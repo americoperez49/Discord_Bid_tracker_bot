@@ -1,0 +1,19 @@
+{
+  "name": "discord-bid-tracker-bot",
+  "version": "1.0.0",
+  "description": "Discord bot for running item auctions: list items, bid via slash commands, track bidders, and export results.",
+  "type": "commonjs",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "deploy": "node src/deploy-commands.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.7"
+  }
+}
