@@ -13,7 +13,7 @@ autocomplete dropdown of the currently-active items.
 
 | Command | Who | What it does |
 | --- | --- | --- |
-| `/auction create item: starting_bid: duration: [description] [increment]` | Moderator | List an item. `duration` looks like `2d12h`, `48h`, `90m`, `1w`. `increment` overrides the default $5 minimum raise. |
+| `/auction create item: starting_bid: duration: [description] [increment] [quantity]` | Moderator | List an item. `duration` looks like `2d12h`, `48h`, `90m`, `1w`. `increment` overrides the default $5 minimum raise. `quantity` (1–25, default 1) lists that many identical copies as separate auctions; when >1, each copy's name is suffixed `(1 of N)`, `(2 of N)`, … so they're easy to tell apart. |
 | `/bid item: amount:` | Anyone | Bid on an active auction. `item` autocompletes to active auctions; `amount` is dollars (`50`, `49.99`). |
 | `/auction list` | Anyone | List active auctions with current high bid and time left. |
 | `/auction info item:` | Anyone | Show one auction's details and recent bids. |

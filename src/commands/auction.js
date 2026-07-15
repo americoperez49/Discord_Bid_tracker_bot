@@ -54,6 +54,13 @@ const data = new SlashCommandBuilder()
         o
           .setName('increment')
           .setDescription('Minimum raise over the current bid (default $5)'),
+      )
+      .addIntegerOption((o) =>
+        o
+          .setName('quantity')
+          .setDescription('How many identical copies to list as separate auctions (default 1, max 25)')
+          .setMinValue(1)
+          .setMaxValue(25),
       ),
   )
   .addSubcommand((sub) =>
@@ -135,11 +142,12 @@ async function execute(interaction) {
 }
 
 async function handleCreate(interaction) {
-  const itemName = interaction.options.getString('item');
+  const baseName = interaction.options.getString('item');
   const startingBidCents = parseDollarsToCents(interaction.options.getString('starting_bid'));
   const durationInput = interaction.options.getString('duration');
   const description = interaction.options.getString('description') ?? null;
   const incrementInput = interaction.options.getString('increment');
+  const quantity = interaction.options.getInteger('quantity') ?? 1;
 
   if (startingBidCents === null || startingBidCents <= 0) {
     return interaction.reply({
@@ -167,35 +175,49 @@ async function handleCreate(interaction) {
     incrementCents = parsed;
   }
 
+  // Posting several announcement messages can take longer than Discord's 3s
+  // reply window, so acknowledge first and edit the reply when done.
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
   const nowIso = new Date().toISOString();
   const endTime = endTimeFromDuration(durationInput);
 
-  const auction = db.createAuction({
-    guild_id: interaction.guildId,
-    channel_id: interaction.channelId,
-    message_id: null,
-    item_name: itemName,
-    description,
-    starting_bid_cents: startingBidCents,
-    min_increment_cents: incrementCents,
-    created_by: interaction.user.id,
-    created_at: nowIso,
-    end_time: endTime,
-  });
+  const created = [];
+  for (let i = 1; i <= quantity; i++) {
+    // When listing multiple copies, make each one's name distinct.
+    const itemName = quantity > 1 ? `${baseName} (${i} of ${quantity})` : baseName;
 
-  // Post the public announcement, then remember its id so we can keep it updated.
-  const message = await interaction.channel.send({ embeds: [buildAuctionEmbed(auction)] });
-  db.setAuctionMessageId(auction.id, message.id);
-  auction.message_id = message.id;
+    const auction = db.createAuction({
+      guild_id: interaction.guildId,
+      channel_id: interaction.channelId,
+      message_id: null,
+      item_name: itemName,
+      description,
+      starting_bid_cents: startingBidCents,
+      min_increment_cents: incrementCents,
+      created_by: interaction.user.id,
+      created_at: nowIso,
+      end_time: endTime,
+    });
 
-  scheduleAuctionEnd(auction);
+    // Post the public announcement, then remember its id so we can keep it updated.
+    const message = await interaction.channel.send({ embeds: [buildAuctionEmbed(auction)] });
+    db.setAuctionMessageId(auction.id, message.id);
+    auction.message_id = message.id;
 
-  await interaction.reply({
-    content:
-      `✅ Auction **#${auction.id} — ${itemName}** created. ` +
-      `Starting bid ${formatCents(startingBidCents)}, ends ${discordRelativeTime(endTime)}.`,
-    flags: MessageFlags.Ephemeral,
-  });
+    scheduleAuctionEnd(auction);
+    created.push(auction);
+  }
+
+  const idList = created.map((a) => `#${a.id}`).join(', ');
+  const content =
+    quantity > 1
+      ? `✅ Created **${quantity}** auctions for **${baseName}** (${idList}). ` +
+        `Starting bid ${formatCents(startingBidCents)} each, all end ${discordRelativeTime(endTime)}.`
+      : `✅ Auction **${idList} — ${baseName}** created. ` +
+        `Starting bid ${formatCents(startingBidCents)}, ends ${discordRelativeTime(endTime)}.`;
+
+  await interaction.editReply({ content });
 }
 
 async function handleList(interaction) {
