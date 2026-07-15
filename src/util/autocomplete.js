@@ -1,11 +1,15 @@
 'use strict';
 
 const db = require('../db');
+const { formatCents } = require('./money');
+
+// Discord limits an autocomplete choice's display name to 100 characters.
+const MAX_CHOICE_NAME = 100;
 
 /**
  * Respond to an autocomplete interaction on the "item" option with the guild's
- * active auctions, filtered by the user's partial input. Each choice's value is
- * the auction id (as a number).
+ * active auctions, filtered by the user's partial input. Each choice shows the
+ * current bid so users can pick without running /auction list first.
  *
  * @param {import('discord.js').AutocompleteInteraction} interaction
  */
@@ -22,18 +26,42 @@ async function respondWithAllAuctions(interaction) {
   await respond(interaction, interaction.guildId ? db.getAllAuctionsForGuild(interaction.guildId) : []);
 }
 
+/**
+ * Build the display label for one auction choice, e.g.
+ *   "#12 — Signed Poster (1 of 3) — $30.00"
+ *   "#13 — Signed Poster (2 of 3) — start $25.00"   (no bids yet)
+ *   "#5 — Old Item [ended] — $40.00"
+ * The item name is truncated if needed so the whole label fits in 100 chars.
+ */
+function buildChoiceName(auction) {
+  const high = db.getHighestBid(auction.id);
+  const bidText = high
+    ? formatCents(high.amount_cents)
+    : `start ${formatCents(auction.starting_bid_cents)}`;
+
+  const prefix = `#${auction.id} — `;
+  const statusTag = auction.status !== 'active' ? ` [${auction.status}]` : '';
+  const suffix = ` — ${bidText}`;
+
+  const room = MAX_CHOICE_NAME - prefix.length - statusTag.length - suffix.length;
+  let name = auction.item_name;
+  if (name.length > room) {
+    name = room > 1 ? name.slice(0, room - 1) + '…' : name.slice(0, Math.max(0, room));
+  }
+
+  return (prefix + name + statusTag + suffix).slice(0, MAX_CHOICE_NAME);
+}
+
 async function respond(interaction, auctions) {
   const focused = interaction.options.getFocused()?.toString().toLowerCase() ?? '';
 
   const choices = auctions
-    .map((a) => ({
-      name: `#${a.id} — ${a.item_name}${a.status !== 'active' ? ` [${a.status}]` : ''}`.slice(0, 100),
-      value: a.id,
-      _haystack: `#${a.id} ${a.item_name}`.toLowerCase(),
-    }))
-    .filter((c) => focused === '' || c._haystack.includes(focused))
+    .filter((a) => {
+      if (focused === '') return true;
+      return `#${a.id} ${a.item_name}`.toLowerCase().includes(focused);
+    })
     .slice(0, 25)
-    .map(({ name, value }) => ({ name, value }));
+    .map((a) => ({ name: buildChoiceName(a), value: a.id }));
 
   await interaction.respond(choices);
 }
