@@ -19,7 +19,11 @@ autocomplete dropdown of the currently-active items.
 | `/auction info item:` | Anyone | Show one auction's details and recent bids. |
 | `/auction end item:` | Moderator | End an auction immediately and announce the winner. |
 | `/auction cancel item:` | Moderator | Cancel an auction (no winner). |
+| `/auction delete item:` | Moderator | Permanently delete one auction and its bids (with a confirmation button); also removes its listing message. |
+| `/auction cleanup` | Moderator | Permanently delete all ended/cancelled auctions in the server at once (confirmation button); active auctions are untouched. |
 | `/auction export [item:]` | Moderator | Download bids as a CSV. Omit `item` to export every auction in the server. |
+
+> Tip: the `/bid` dropdown shows each item's price inline — `Current Bid $30.00`, or `Starting Bid $25.00` when there are no bids yet — so you can bid without running `/auction list`.
 
 "Moderator" = anyone with the **Manage Server** permission, or the role set in `MOD_ROLE_ID`.
 

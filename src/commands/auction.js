@@ -6,6 +6,9 @@ const {
   MessageFlags,
   AttachmentBuilder,
   EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
 } = require('discord.js');
 
 const db = require('../db');
@@ -19,7 +22,7 @@ const { buildAuctionEmbed } = require('../util/embeds');
 const { buildCsv } = require('../util/csv');
 const { isModerator } = require('../util/permissions');
 const { respondWithActiveAuctions, respondWithAllAuctions } = require('../util/autocomplete');
-const { scheduleAuctionEnd, endAuction } = require('../scheduler');
+const { scheduleAuctionEnd, endAuction, cancelScheduled } = require('../scheduler');
 
 const DEFAULT_INCREMENT_CENTS = 500; // $5
 
@@ -92,6 +95,19 @@ const data = new SlashCommandBuilder()
   )
   .addSubcommand((sub) =>
     sub
+      .setName('delete')
+      .setDescription('Permanently delete an auction and its bids (moderator only).')
+      .addIntegerOption((o) =>
+        o.setName('item').setDescription('The auction').setRequired(true).setAutocomplete(true),
+      ),
+  )
+  .addSubcommand((sub) =>
+    sub
+      .setName('cleanup')
+      .setDescription('Delete all ended/cancelled auctions in this server (moderator only).'),
+  )
+  .addSubcommand((sub) =>
+    sub
       .setName('export')
       .setDescription('Download the bid list as a CSV (moderator only).')
       .addIntegerOption((o) =>
@@ -104,7 +120,7 @@ const data = new SlashCommandBuilder()
 
 async function autocomplete(interaction) {
   const sub = interaction.options.getSubcommand();
-  if (sub === 'export') {
+  if (sub === 'export' || sub === 'delete') {
     await respondWithAllAuctions(interaction);
   } else {
     await respondWithActiveAuctions(interaction);
@@ -115,7 +131,7 @@ async function execute(interaction) {
   const sub = interaction.options.getSubcommand();
 
   // Runtime moderator gate for privileged subcommands.
-  const modOnly = ['create', 'end', 'cancel', 'export'];
+  const modOnly = ['create', 'end', 'cancel', 'export', 'delete', 'cleanup'];
   if (modOnly.includes(sub) && !isModerator(interaction.member)) {
     return interaction.reply({
       content: '🚫 You need the moderator role (or "Manage Server") to use this command.',
@@ -134,6 +150,10 @@ async function execute(interaction) {
       return handleEnd(interaction);
     case 'cancel':
       return handleCancel(interaction);
+    case 'delete':
+      return handleDelete(interaction);
+    case 'cleanup':
+      return handleCleanup(interaction);
     case 'export':
       return handleExport(interaction);
     default:
@@ -315,6 +335,117 @@ async function handleCancel(interaction) {
   return interaction.reply({
     content: `❌ Auction #${auctionId} cancelled.`,
     flags: MessageFlags.Ephemeral,
+  });
+}
+
+/**
+ * Show a Confirm/Cancel button prompt (ephemeral) and wait for the invoker's
+ * choice. Resolves to the button interaction if confirmed, or null if the user
+ * cancelled or the 30s window elapsed (in which case the reply is already
+ * updated). The caller finalises the message via `confirmation.update(...)`.
+ */
+async function confirmDestructive(interaction, promptContent, confirmLabel) {
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('confirm').setLabel(confirmLabel).setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId('cancel').setLabel('Cancel').setStyle(ButtonStyle.Secondary),
+  );
+
+  const reply = await interaction.reply({
+    content: promptContent,
+    components: [row],
+    flags: MessageFlags.Ephemeral,
+    fetchReply: true,
+  });
+
+  let confirmation;
+  try {
+    confirmation = await reply.awaitMessageComponent({
+      filter: (i) => i.user.id === interaction.user.id,
+      time: 30_000,
+    });
+  } catch {
+    await interaction.editReply({ content: '⏱️ Timed out — nothing was deleted.', components: [] });
+    return null;
+  }
+
+  if (confirmation.customId !== 'confirm') {
+    await confirmation.update({ content: '✋ Cancelled — nothing was deleted.', components: [] });
+    return null;
+  }
+
+  return confirmation;
+}
+
+/** Best-effort removal of an auction's public announcement message. */
+async function deleteAnnouncement(interaction, auction) {
+  if (!auction.message_id) return;
+  try {
+    const channel =
+      auction.channel_id === interaction.channelId
+        ? interaction.channel
+        : await interaction.client.channels.fetch(auction.channel_id).catch(() => null);
+    if (!channel?.isTextBased()) return;
+    const msg = await channel.messages.fetch(auction.message_id).catch(() => null);
+    if (msg) await msg.delete();
+  } catch {
+    /* message may already be gone — ignore */
+  }
+}
+
+async function handleDelete(interaction) {
+  const auctionId = interaction.options.getInteger('item');
+  const auction = db.getAuction(auctionId);
+  if (!auction || auction.guild_id !== interaction.guildId) {
+    return interaction.reply({
+      content: `⚠️ Auction #${auctionId} not found in this server.`,
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+
+  const bidCount = db.getBidCount(auctionId);
+  let prompt =
+    `🗑️ Delete auction **#${auction.id} — ${auction.item_name}** (${auction.status})?\n` +
+    `This permanently removes it and its **${bidCount}** bid(s), and can't be undone.`;
+  if (auction.status === 'active') {
+    prompt += `\n⚠️ This auction is still **active** — bidders will lose it.`;
+  }
+
+  const confirmation = await confirmDestructive(interaction, prompt, 'Delete');
+  if (!confirmation) return;
+
+  cancelScheduled(auctionId);
+  db.deleteAuction(auctionId);
+
+  await confirmation.update({
+    content: `🗑️ Deleted auction **#${auction.id} — ${auction.item_name}** and its ${bidCount} bid(s).`,
+    components: [],
+  });
+
+  // Remove the public listing message after confirming (best-effort).
+  deleteAnnouncement(interaction, auction).catch(() => {});
+}
+
+async function handleCleanup(interaction) {
+  const finished = db.getFinishedAuctionsForGuild(interaction.guildId);
+  if (finished.length === 0) {
+    return interaction.reply({
+      content: 'There are no ended or cancelled auctions to clean up.',
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+
+  const prompt =
+    `🧹 Delete all **${finished.length}** ended/cancelled auction(s) in this server ` +
+    `(and their bids)? This can't be undone. Active auctions are not affected.`;
+
+  const confirmation = await confirmDestructive(interaction, prompt, `Delete ${finished.length}`);
+  if (!confirmation) return;
+
+  const removed = db.deleteFinishedAuctionsForGuild(interaction.guildId);
+
+  await confirmation.update({
+    content: `🧹 Deleted **${removed.length}** finished auction(s). Their old listing messages remain as a record.`,
+    components: [],
   });
 }
 

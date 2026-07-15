@@ -151,4 +151,13 @@ async function announceOutcome(auction, winner, status) {
   });
 }
 
-module.exports = { initScheduler, scheduleAuctionEnd, endAuction };
+/**
+ * Cancel a pending end timer (used when an auction is deleted). Safe to call
+ * even if no timer is scheduled for the id.
+ * @param {number} auctionId
+ */
+function cancelScheduled(auctionId) {
+  clearAuctionTimer(auctionId);
+}
+
+module.exports = { initScheduler, scheduleAuctionEnd, endAuction, cancelScheduled };

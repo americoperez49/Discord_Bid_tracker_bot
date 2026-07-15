@@ -84,6 +84,15 @@ const stmts = {
        SET status = ?, winner_user_id = ?, winning_amount_cents = ?
      WHERE id = ? AND status = 'active'
   `),
+  deleteAuction: db.prepare(`DELETE FROM auctions WHERE id = ?`),
+  getFinishedForGuild: db.prepare(`
+    SELECT * FROM auctions
+     WHERE guild_id = ? AND status IN ('ended', 'cancelled')
+     ORDER BY id
+  `),
+  deleteFinishedForGuild: db.prepare(`
+    DELETE FROM auctions WHERE guild_id = ? AND status IN ('ended', 'cancelled')
+  `),
 };
 
 /**
@@ -197,6 +206,30 @@ function finalizeAuction(auctionId, status) {
   return { auction: stmts.getAuction.get(auctionId), winner };
 }
 
+/**
+ * Permanently delete an auction and (via ON DELETE CASCADE) all of its bids.
+ * @param {number} auctionId
+ * @returns {number} number of auction rows removed (0 or 1).
+ */
+function deleteAuction(auctionId) {
+  return stmts.deleteAuction.run(auctionId).changes;
+}
+
+function getFinishedAuctionsForGuild(guildId) {
+  return stmts.getFinishedForGuild.all(guildId);
+}
+
+/**
+ * Permanently delete every ended/cancelled auction in a guild (and their bids).
+ * @param {string} guildId
+ * @returns {object[]} the auction rows that were removed.
+ */
+function deleteFinishedAuctionsForGuild(guildId) {
+  const rows = stmts.getFinishedForGuild.all(guildId);
+  stmts.deleteFinishedForGuild.run(guildId);
+  return rows;
+}
+
 module.exports = {
   db,
   DB_PATH,
@@ -212,4 +245,7 @@ module.exports = {
   getRecentBids,
   placeBid,
   finalizeAuction,
+  deleteAuction,
+  getFinishedAuctionsForGuild,
+  deleteFinishedAuctionsForGuild,
 };

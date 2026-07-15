@@ -28,16 +28,16 @@ async function respondWithAllAuctions(interaction) {
 
 /**
  * Build the display label for one auction choice, e.g.
- *   "#12 — Signed Poster (1 of 3) — $30.00"
- *   "#13 — Signed Poster (2 of 3) — start $25.00"   (no bids yet)
- *   "#5 — Old Item [ended] — $40.00"
+ *   "#12 — Signed Poster (1 of 3) — Current Bid $30.00"
+ *   "#13 — Signed Poster (2 of 3) — Starting Bid $25.00"   (no bids yet)
+ *   "#5 — Old Item [ended] — Current Bid $40.00"
  * The item name is truncated if needed so the whole label fits in 100 chars.
  */
 function buildChoiceName(auction) {
   const high = db.getHighestBid(auction.id);
   const bidText = high
-    ? formatCents(high.amount_cents)
-    : `start ${formatCents(auction.starting_bid_cents)}`;
+    ? `Current Bid ${formatCents(high.amount_cents)}`
+    : `Starting Bid ${formatCents(auction.starting_bid_cents)}`;
 
   const prefix = `#${auction.id} — `;
   const statusTag = auction.status !== 'active' ? ` [${auction.status}]` : '';
