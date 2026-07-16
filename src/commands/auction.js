@@ -532,7 +532,12 @@ async function handleExport(interaction) {
   for (const a of auctions) {
     const type = a.group_mode ? 'group' : 'single';
     const slots = a.group_mode ? a.winners : 1;
-    const bids = db.getBidsForAuction(a.id);
+    // Export in the order bids were placed (chronological). placed_at is an ISO
+    // UTC string, so a lexicographic sort is also chronological.
+    const bids = db
+      .getBidsForAuction(a.id)
+      .slice()
+      .sort((x, y) => (x.placed_at < y.placed_at ? -1 : x.placed_at > y.placed_at ? 1 : 0));
     if (bids.length === 0) {
       rows.push([a.id, a.item_name, type, slots, a.status, a.end_time, '', '(no bids)', '', '', '', '']);
       continue;
