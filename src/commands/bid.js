@@ -94,15 +94,24 @@ async function execute(interaction) {
     })
     .catch(() => {});
 
-  // In group mode, ping anyone who was displaced so they know to re-bid.
-  if (auction.group_mode && result.kicked) {
+  // Ping whoever was outbid so they know they can bid again.
+  //  - Group: the bidder displaced from a winning slot (if any).
+  //  - Normal: the previous high bidder, unless it's the same person raising
+  //    their own bid.
+  const outbidId = auction.group_mode
+    ? result.kicked?.user_id ?? null
+    : result.previousHigh && result.previousHigh.user_id !== bidder.id
+      ? result.previousHigh.user_id
+      : null;
+
+  if (outbidId) {
+    const msg = auction.group_mode
+      ? `⚠️ <@${outbidId}>, you were outbid on **${label}** and lost your slot. ` +
+        `Bid again (min **${formatCents(nextMin)}**) to reclaim one before it ends!`
+      : `⚠️ <@${outbidId}>, you've been outbid on **${label}** — the high bid is now ` +
+        `**${formatCents(amountCents)}**. Bid again (min **${formatCents(nextMin)}**) before it ends!`;
     await interaction.channel
-      ?.send({
-        content:
-          `⚠️ <@${result.kicked.user_id}>, you were outbid on **${label}** and lost your slot. ` +
-          `Bid again (min **${formatCents(nextMin)}**) to reclaim one before it ends!`,
-        allowedMentions: { users: [result.kicked.user_id] },
-      })
+      ?.send({ content: msg, allowedMentions: { users: [outbidId] } })
       .catch(() => {});
   }
 }
