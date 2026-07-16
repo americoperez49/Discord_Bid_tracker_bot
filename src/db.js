@@ -46,11 +46,12 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_bids_auction ON bids(auction_id);
-  CREATE INDEX IF NOT EXISTS idx_bids_active ON bids(auction_id, active);
   CREATE INDEX IF NOT EXISTS idx_auctions_status ON auctions(status);
 `);
 
 // --- Migrations: add columns to databases created before these features. ---
+// Must run before any index/query that references the new columns, since an
+// existing table won't have them yet (CREATE TABLE IF NOT EXISTS is a no-op).
 function ensureColumn(table, column, ddl) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all();
   if (!cols.some((c) => c.name === column)) {
@@ -60,6 +61,9 @@ function ensureColumn(table, column, ddl) {
 ensureColumn('auctions', 'group_mode', 'group_mode INTEGER NOT NULL DEFAULT 0');
 ensureColumn('auctions', 'winners', 'winners INTEGER NOT NULL DEFAULT 1');
 ensureColumn('bids', 'active', 'active INTEGER NOT NULL DEFAULT 1');
+
+// Index on the (now-guaranteed) `active` column, after the migration above.
+db.exec(`CREATE INDEX IF NOT EXISTS idx_bids_active ON bids(auction_id, active);`);
 
 // --- Prepared statements ---
 const stmts = {
