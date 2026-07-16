@@ -64,6 +64,18 @@ const data = new SlashCommandBuilder()
           .setDescription('How many identical copies to list as separate auctions (default 1, max 25)')
           .setMinValue(1)
           .setMaxValue(25),
+      )
+      .addBooleanOption((o) =>
+        o
+          .setName('group_bidding')
+          .setDescription('One shared auction where the top N bids win (one bid per person). Set winners too.'),
+      )
+      .addIntegerOption((o) =>
+        o
+          .setName('winners')
+          .setDescription('Group bidding only: number of winning slots / items (2–25)')
+          .setMinValue(2)
+          .setMaxValue(25),
       ),
   )
   .addSubcommand((sub) =>
@@ -168,6 +180,8 @@ async function handleCreate(interaction) {
   const description = interaction.options.getString('description') ?? null;
   const incrementInput = interaction.options.getString('increment');
   const quantity = interaction.options.getInteger('quantity') ?? 1;
+  const groupMode = interaction.options.getBoolean('group_bidding') ?? false;
+  const winners = interaction.options.getInteger('winners');
 
   if (startingBidCents === null || startingBidCents <= 0) {
     return interaction.reply({
@@ -195,6 +209,15 @@ async function handleCreate(interaction) {
     incrementCents = parsed;
   }
 
+  if (groupMode && (winners === null || winners < 2)) {
+    return interaction.reply({
+      content:
+        '⚠️ For group bidding, set `winners` to the number of winning slots (2–25). ' +
+        'Example: 4 identical cases → `group_bidding: True`, `winners: 4`.',
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+
   // Posting several announcement messages can take longer than Discord's 3s
   // reply window, so acknowledge first and edit the reply when done.
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -202,23 +225,41 @@ async function handleCreate(interaction) {
   const nowIso = new Date().toISOString();
   const endTime = endTimeFromDuration(durationInput);
 
+  const base = {
+    guild_id: interaction.guildId,
+    channel_id: interaction.channelId,
+    message_id: null,
+    description,
+    starting_bid_cents: startingBidCents,
+    min_increment_cents: incrementCents,
+    created_by: interaction.user.id,
+    created_at: nowIso,
+    end_time: endTime,
+  };
+
+  // Group bidding: one shared auction with N winner slots (quantity is ignored).
+  if (groupMode) {
+    const auction = db.createAuction({ ...base, item_name: baseName, group_mode: 1, winners });
+    const message = await interaction.channel.send({ embeds: [buildAuctionEmbed(auction)] });
+    db.setAuctionMessageId(auction.id, message.id);
+    auction.message_id = message.id;
+    scheduleAuctionEnd(auction);
+
+    let content =
+      `✅ Group auction **#${auction.id} — ${baseName}** created with **${winners} winner slots**. ` +
+      `Starting bid ${formatCents(startingBidCents)}, ends ${discordRelativeTime(endTime)}.`;
+    if (quantity > 1) content += `\n_(quantity is ignored in group mode — winners controls the slots.)_`;
+    await interaction.editReply({ content });
+    return;
+  }
+
+  // Normal mode: `quantity` independent auctions.
   const created = [];
   for (let i = 1; i <= quantity; i++) {
     // When listing multiple copies, make each one's name distinct.
     const itemName = quantity > 1 ? `${baseName} (${i} of ${quantity})` : baseName;
 
-    const auction = db.createAuction({
-      guild_id: interaction.guildId,
-      channel_id: interaction.channelId,
-      message_id: null,
-      item_name: itemName,
-      description,
-      starting_bid_cents: startingBidCents,
-      min_increment_cents: incrementCents,
-      created_by: interaction.user.id,
-      created_at: nowIso,
-      end_time: endTime,
-    });
+    const auction = db.createAuction({ ...base, item_name: itemName });
 
     // Post the public announcement, then remember its id so we can keep it updated.
     const message = await interaction.channel.send({ embeds: [buildAuctionEmbed(auction)] });
@@ -475,6 +516,8 @@ async function handleExport(interaction) {
   const headers = [
     'auction_id',
     'item_name',
+    'auction_type',
+    'winner_slots',
     'auction_status',
     'auction_end_time_utc',
     'bidder_user_id',
@@ -487,19 +530,26 @@ async function handleExport(interaction) {
 
   const rows = [];
   for (const a of auctions) {
+    const type = a.group_mode ? 'group' : 'single';
+    const slots = a.group_mode ? a.winners : 1;
     const bids = db.getBidsForAuction(a.id);
     if (bids.length === 0) {
-      rows.push([a.id, a.item_name, a.status, a.end_time, '', '(no bids)', '', '', '', '']);
+      rows.push([a.id, a.item_name, type, slots, a.status, a.end_time, '', '(no bids)', '', '', '', '']);
       continue;
     }
     for (const b of bids) {
+      // Group winners are the bids still active at close; normal auctions have
+      // the single recorded top bid.
       const isWinning =
         a.status === 'ended' &&
-        a.winner_user_id === b.user_id &&
-        a.winning_amount_cents === b.amount_cents;
+        (a.group_mode
+          ? b.active === 1
+          : a.winner_user_id === b.user_id && a.winning_amount_cents === b.amount_cents);
       rows.push([
         a.id,
         a.item_name,
+        type,
+        slots,
         a.status,
         a.end_time,
         b.user_id,

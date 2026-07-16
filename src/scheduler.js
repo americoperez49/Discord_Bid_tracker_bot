@@ -99,11 +99,11 @@ async function endAuction(auctionId, status = 'ended') {
   const result = db.finalizeAuction(auctionId, status);
   if (!result) return null; // already ended/cancelled elsewhere
 
-  const { auction, winner } = result;
+  const { auction, winners } = result;
 
   if (clientRef) {
     try {
-      await announceOutcome(auction, winner, status);
+      await announceOutcome(auction, winners, status);
     } catch (err) {
       console.error(`Failed to announce outcome for auction #${auctionId}:`, err);
     }
@@ -114,9 +114,10 @@ async function endAuction(auctionId, status = 'ended') {
 
 /**
  * Edit the original announcement embed and post a result message that pings
- * everyone who bid.
+ * everyone who bid. `winners` is an array: one entry for a normal auction, up
+ * to `auction.winners` entries for a group auction.
  */
-async function announceOutcome(auction, winner, status) {
+async function announceOutcome(auction, winners, status) {
   const channel = await clientRef.channels.fetch(auction.channel_id).catch(() => null);
   if (!channel || !channel.isTextBased()) return;
 
@@ -130,19 +131,27 @@ async function announceOutcome(auction, winner, status) {
 
   const bidders = new Set(db.getBidsForAuction(auction.id).map((b) => b.user_id));
   const mentions = [...bidders].map((id) => `<@${id}>`).join(' ');
+  const label = `#${auction.id} — ${auction.item_name}`;
 
   let content;
   if (status === 'cancelled') {
-    content = `❌ **Auction #${auction.id} — ${auction.item_name}** was cancelled.`;
+    content = `❌ **Auction ${label}** was cancelled.`;
     if (mentions) content += `\n${mentions}`;
-  } else if (winner) {
+  } else if (winners.length === 0) {
+    content = `🏁 **Auction ${label}** has ended with no bids.`;
+  } else if (auction.group_mode) {
+    const lines = winners
+      .map((w, i) => `**${i + 1}.** <@${w.user_id}> — ${formatCents(w.amount_cents)}`)
+      .join('\n');
     content =
-      `🏁 **Auction #${auction.id} — ${auction.item_name}** has ended!\n` +
-      `🏆 Winner: <@${winner.user_id}> with **${formatCents(winner.amount_cents)}**.\n` +
-      (mentions ? `Thanks to all bidders: ${mentions}` : '');
+      `🏁 **Group auction ${label}** has ended!\n` +
+      `🏆 **${winners.length} winner${winners.length === 1 ? '' : 's'}** (one item each):\n${lines}` +
+      (mentions ? `\n\nThanks to all bidders: ${mentions}` : '');
   } else {
     content =
-      `🏁 **Auction #${auction.id} — ${auction.item_name}** has ended with no bids.`;
+      `🏁 **Auction ${label}** has ended!\n` +
+      `🏆 Winner: <@${winners[0].user_id}> with **${formatCents(winners[0].amount_cents)}**.\n` +
+      (mentions ? `Thanks to all bidders: ${mentions}` : '');
   }
 
   await channel.send({

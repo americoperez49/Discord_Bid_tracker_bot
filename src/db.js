@@ -30,7 +30,9 @@ db.exec(`
     end_time            TEXT    NOT NULL,
     status              TEXT    NOT NULL DEFAULT 'active',
     winner_user_id      TEXT,
-    winning_amount_cents INTEGER
+    winning_amount_cents INTEGER,
+    group_mode          INTEGER NOT NULL DEFAULT 0,
+    winners             INTEGER NOT NULL DEFAULT 1
   );
 
   CREATE TABLE IF NOT EXISTS bids (
@@ -39,22 +41,37 @@ db.exec(`
     user_id     TEXT    NOT NULL,
     username    TEXT    NOT NULL,
     amount_cents INTEGER NOT NULL,
-    placed_at   TEXT    NOT NULL
+    placed_at   TEXT    NOT NULL,
+    active      INTEGER NOT NULL DEFAULT 1
   );
 
   CREATE INDEX IF NOT EXISTS idx_bids_auction ON bids(auction_id);
+  CREATE INDEX IF NOT EXISTS idx_bids_active ON bids(auction_id, active);
   CREATE INDEX IF NOT EXISTS idx_auctions_status ON auctions(status);
 `);
+
+// --- Migrations: add columns to databases created before these features. ---
+function ensureColumn(table, column, ddl) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (!cols.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+  }
+}
+ensureColumn('auctions', 'group_mode', 'group_mode INTEGER NOT NULL DEFAULT 0');
+ensureColumn('auctions', 'winners', 'winners INTEGER NOT NULL DEFAULT 1');
+ensureColumn('bids', 'active', 'active INTEGER NOT NULL DEFAULT 1');
 
 // --- Prepared statements ---
 const stmts = {
   insertAuction: db.prepare(`
     INSERT INTO auctions
       (guild_id, channel_id, message_id, item_name, description,
-       starting_bid_cents, min_increment_cents, created_by, created_at, end_time, status)
+       starting_bid_cents, min_increment_cents, created_by, created_at, end_time, status,
+       group_mode, winners)
     VALUES
       (@guild_id, @channel_id, @message_id, @item_name, @description,
-       @starting_bid_cents, @min_increment_cents, @created_by, @created_at, @end_time, 'active')
+       @starting_bid_cents, @min_increment_cents, @created_by, @created_at, @end_time, 'active',
+       @group_mode, @winners)
   `),
   setMessageId: db.prepare(`UPDATE auctions SET message_id = ? WHERE id = ?`),
   getAuction: db.prepare(`SELECT * FROM auctions WHERE id = ?`),
@@ -76,8 +93,8 @@ const stmts = {
     SELECT * FROM bids WHERE auction_id = ? ORDER BY id DESC LIMIT ?
   `),
   insertBid: db.prepare(`
-    INSERT INTO bids (auction_id, user_id, username, amount_cents, placed_at)
-    VALUES (@auction_id, @user_id, @username, @amount_cents, @placed_at)
+    INSERT INTO bids (auction_id, user_id, username, amount_cents, placed_at, active)
+    VALUES (@auction_id, @user_id, @username, @amount_cents, @placed_at, @active)
   `),
   finalizeAuction: db.prepare(`
     UPDATE auctions
@@ -93,13 +110,37 @@ const stmts = {
   deleteFinishedForGuild: db.prepare(`
     DELETE FROM auctions WHERE guild_id = ? AND status IN ('ended', 'cancelled')
   `),
+  // Group-mode: the current "winning set" is the active=1 bids.
+  getActiveBidsAsc: db.prepare(`
+    SELECT * FROM bids WHERE auction_id = ? AND active = 1
+     ORDER BY amount_cents ASC, placed_at ASC
+  `),
+  getActiveBidsDesc: db.prepare(`
+    SELECT * FROM bids WHERE auction_id = ? AND active = 1
+     ORDER BY amount_cents DESC, placed_at ASC
+  `),
+  getActiveBidForUser: db.prepare(`
+    SELECT * FROM bids WHERE auction_id = ? AND user_id = ? AND active = 1 LIMIT 1
+  `),
+  // The bid to displace when a full winning set is beaten: lowest amount, and
+  // among ties at that amount the most recently placed (LIFO).
+  getLowestActiveToKick: db.prepare(`
+    SELECT * FROM bids WHERE auction_id = ? AND active = 1
+     ORDER BY amount_cents ASC, placed_at DESC LIMIT 1
+  `),
+  deactivateBid: db.prepare(`UPDATE bids SET active = 0 WHERE id = ?`),
 };
 
 /**
- * Create a new auction. Returns the created row (with its new id).
+ * Create a new auction. `group_mode` (0/1) and `winners` default to a normal
+ * single-winner auction when not supplied. Returns the created row.
  */
 function createAuction(data) {
-  const info = stmts.insertAuction.run(data);
+  const info = stmts.insertAuction.run({
+    group_mode: 0,
+    winners: 1,
+    ...data,
+  });
   return stmts.getAuction.get(info.lastInsertRowid);
 }
 
@@ -139,16 +180,133 @@ function getRecentBids(auctionId, limit = 5) {
   return stmts.getRecentBids.all(auctionId, limit);
 }
 
+/** Group-mode: current winning bids, highest first. */
+function getActiveBids(auctionId) {
+  return stmts.getActiveBidsDesc.all(auctionId);
+}
+
 /**
- * Atomically validate and record a bid.
+ * The minimum amount the next bid must reach.
+ *  - Normal: current high bid + increment, or the starting bid if no bids yet.
+ *  - Group: the starting bid while winning slots remain open; once all `winners`
+ *    slots are full, the lowest winning bid + increment.
+ * @param {object} auction
+ * @returns {number} minimum acceptable bid, in cents.
+ */
+function nextMinBidCents(auction) {
+  if (!auction.group_mode) {
+    const high = stmts.getHighestBid.get(auction.id);
+    return high ? high.amount_cents + auction.min_increment_cents : auction.starting_bid_cents;
+  }
+  const active = stmts.getActiveBidsAsc.all(auction.id);
+  if (active.length < auction.winners) return auction.starting_bid_cents;
+  return active[0].amount_cents + auction.min_increment_cents;
+}
+
+/** Group-mode: how many of the `winners` slots are currently filled. */
+function getFilledSlots(auction) {
+  return stmts.getActiveBidsAsc.all(auction.id).length;
+}
+
+// --- Bidding ---------------------------------------------------------------
+
+/** Normal single-winner bid (append-only history; highest bid wins). */
+function normalBid(auction, bidder, amountCents, nowIso) {
+  const currentHigh = stmts.getHighestBid.get(auction.id) ?? null;
+  const requiredCents = currentHigh
+    ? currentHigh.amount_cents + auction.min_increment_cents
+    : auction.starting_bid_cents;
+
+  if (amountCents < requiredCents) {
+    return { ok: false, reason: 'too_low', requiredCents };
+  }
+
+  const info = stmts.insertBid.run({
+    auction_id: auction.id,
+    user_id: bidder.id,
+    username: bidder.username,
+    amount_cents: amountCents,
+    placed_at: nowIso,
+    active: 1,
+  });
+
+  return {
+    ok: true,
+    groupMode: false,
+    bid: {
+      id: Number(info.lastInsertRowid),
+      auction_id: auction.id,
+      user_id: bidder.id,
+      username: bidder.username,
+      amount_cents: amountCents,
+      placed_at: nowIso,
+    },
+    previousHigh: currentHigh,
+  };
+}
+
+/**
+ * Group multi-winner bid.
+ *  - A bidder may hold only one active (winning) bid at a time.
+ *  - While fewer than `winners` slots are filled, the minimum is the starting
+ *    bid (ties allowed).
+ *  - Once full, the minimum is the lowest winning bid + increment; the new bid
+ *    displaces the most-recently-placed bid at the lowest amount (LIFO), who is
+ *    "outbid" and free to bid again.
+ */
+function groupBid(auction, bidder, amountCents, nowIso) {
+  const active = stmts.getActiveBidsAsc.all(auction.id); // lowest first
+  const mine = active.find((b) => b.user_id === bidder.id);
+  if (mine) {
+    return { ok: false, reason: 'already_bidding', groupMode: true, currentCents: mine.amount_cents };
+  }
+
+  const full = active.length >= auction.winners;
+  const requiredCents = full
+    ? active[0].amount_cents + auction.min_increment_cents
+    : auction.starting_bid_cents;
+
+  if (amountCents < requiredCents) {
+    return { ok: false, reason: 'too_low', requiredCents, groupMode: true };
+  }
+
+  const info = stmts.insertBid.run({
+    auction_id: auction.id,
+    user_id: bidder.id,
+    username: bidder.username,
+    amount_cents: amountCents,
+    placed_at: nowIso,
+    active: 1,
+  });
+
+  const bid = {
+    id: Number(info.lastInsertRowid),
+    auction_id: auction.id,
+    user_id: bidder.id,
+    username: bidder.username,
+    amount_cents: amountCents,
+    placed_at: nowIso,
+  };
+
+  // If we've exceeded capacity, displace the lowest winning bid (LIFO on ties).
+  // When the set was full, requiredCents > lowest, so the new bid is never the
+  // one displaced.
+  let kicked = null;
+  if (active.length + 1 > auction.winners) {
+    kicked = stmts.getLowestActiveToKick.get(auction.id);
+    stmts.deactivateBid.run(kicked.id);
+  }
+
+  return { ok: true, groupMode: true, bid, kicked, nextMinCents: nextMinBidCents(auction) };
+}
+
+/**
+ * Atomically validate and record a bid, dispatching to the normal or group
+ * algorithm. Runs in a transaction so the read/validate/insert/displace
+ * sequence cannot interleave with a competing bid.
  *
- * Runs inside a transaction so the "read current highest -> validate -> insert"
- * sequence cannot interleave with a competing bid (better-sqlite3 is synchronous,
- * so the transaction body runs to completion before any other bid is processed).
- *
- * @returns {{ok: true, bid: object, previousHigh: object|null}
- *          | {ok: false, reason: string, requiredCents?: number,
- *             endTime?: string, status?: string}}
+ * @returns success `{ok:true, groupMode, bid, previousHigh?|kicked?, nextMinCents?}`
+ *   or failure `{ok:false, reason, requiredCents?, currentCents?, endTime?, status?}`.
  */
 const placeBidTxn = db.transaction((auctionId, bidder, amountCents, nowIso) => {
   const auction = stmts.getAuction.get(auctionId);
@@ -160,28 +318,9 @@ const placeBidTxn = db.transaction((auctionId, bidder, amountCents, nowIso) => {
     return { ok: false, reason: 'expired', endTime: auction.end_time };
   }
 
-  const currentHigh = stmts.getHighestBid.get(auctionId) ?? null;
-  const requiredCents = currentHigh
-    ? currentHigh.amount_cents + auction.min_increment_cents
-    : auction.starting_bid_cents;
-
-  if (amountCents < requiredCents) {
-    return { ok: false, reason: 'too_low', requiredCents };
-  }
-
-  const info = stmts.insertBid.run({
-    auction_id: auctionId,
-    user_id: bidder.id,
-    username: bidder.username,
-    amount_cents: amountCents,
-    placed_at: nowIso,
-  });
-
-  const bid = { id: Number(info.lastInsertRowid), auction_id: auctionId,
-    user_id: bidder.id, username: bidder.username,
-    amount_cents: amountCents, placed_at: nowIso };
-
-  return { ok: true, bid, previousHigh: currentHigh };
+  return auction.group_mode
+    ? groupBid(auction, bidder, amountCents, nowIso)
+    : normalBid(auction, bidder, amountCents, nowIso);
 });
 
 function placeBid(auctionId, bidder, amountCents, nowIso = new Date().toISOString()) {
@@ -189,21 +328,39 @@ function placeBid(auctionId, bidder, amountCents, nowIso = new Date().toISOStrin
 }
 
 /**
- * Mark an auction ended/cancelled, recording the winner (if any).
+ * Mark an auction ended/cancelled and determine the winner(s).
+ *  - Normal ended: the single highest bid.
+ *  - Group ended: all currently-active (winning) bids, highest first.
  * @param {number} auctionId
  * @param {'ended'|'cancelled'} status
- * @returns {{auction: object, winner: object|null}|null} null if not active.
+ * @returns {{auction: object, winners: object[]}|null} null if not active.
  */
-function finalizeAuction(auctionId, status) {
-  const winner = status === 'ended' ? getHighestBid(auctionId) : null;
-  const changed = stmts.finalizeAuction.run(
+const finalizeTxn = db.transaction((auctionId, status) => {
+  const auction = stmts.getAuction.get(auctionId);
+  if (!auction || auction.status !== 'active') return null;
+
+  let winners = [];
+  if (status === 'ended') {
+    if (auction.group_mode) {
+      winners = stmts.getActiveBidsDesc.all(auctionId);
+    } else {
+      const high = stmts.getHighestBid.get(auctionId);
+      winners = high ? [high] : [];
+    }
+  }
+
+  const primary = winners[0] ?? null;
+  stmts.finalizeAuction.run(
     status,
-    winner?.user_id ?? null,
-    winner?.amount_cents ?? null,
+    primary?.user_id ?? null,
+    primary?.amount_cents ?? null,
     auctionId,
   );
-  if (changed.changes === 0) return null; // already finalized or gone
-  return { auction: stmts.getAuction.get(auctionId), winner };
+  return { auction: stmts.getAuction.get(auctionId), winners };
+});
+
+function finalizeAuction(auctionId, status) {
+  return finalizeTxn(auctionId, status);
 }
 
 /**
@@ -243,6 +400,9 @@ module.exports = {
   getBidCount,
   getBidsForAuction,
   getRecentBids,
+  getActiveBids,
+  nextMinBidCents,
+  getFilledSlots,
   placeBid,
   finalizeAuction,
   deleteAuction,

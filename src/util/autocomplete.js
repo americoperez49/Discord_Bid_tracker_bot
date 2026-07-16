@@ -34,10 +34,16 @@ async function respondWithAllAuctions(interaction) {
  * The item name is truncated if needed so the whole label fits in 100 chars.
  */
 function buildChoiceName(auction) {
-  const high = db.getHighestBid(auction.id);
-  const bidText = high
-    ? `Current Bid ${formatCents(high.amount_cents)}`
-    : `Starting Bid ${formatCents(auction.starting_bid_cents)}`;
+  let bidText;
+  if (auction.group_mode) {
+    // e.g. "Min Bid $110 (4/4 winners)"
+    bidText = `Min Bid ${formatCents(db.nextMinBidCents(auction))} (${db.getFilledSlots(auction)}/${auction.winners} winners)`;
+  } else {
+    const high = db.getHighestBid(auction.id);
+    bidText = high
+      ? `Current Bid ${formatCents(high.amount_cents)}`
+      : `Starting Bid ${formatCents(auction.starting_bid_cents)}`;
+  }
 
   const prefix = `#${auction.id} — `;
   const statusTag = auction.status !== 'active' ? ` [${auction.status}]` : '';

@@ -55,6 +55,11 @@ async function execute(interaction) {
       case 'expired':
         content = `⏰ Auction #${auctionId} has already ended (${discordRelativeTime(result.endTime)}).`;
         break;
+      case 'already_bidding':
+        content =
+          `⚠️ You already have an active winning bid of **${formatCents(result.currentCents)}** ` +
+          `on this group auction. You can only bid again if you get outbid.`;
+        break;
       case 'too_low':
         content =
           `⚠️ Your bid of ${formatCents(amountCents)} is too low. ` +
@@ -67,23 +72,39 @@ async function execute(interaction) {
   }
 
   const auction = db.getAuction(auctionId);
+  const label = `#${auction.id} — ${auction.item_name}`;
+  const nextMin = db.nextMinBidCents(auction);
 
-  // Confirm to the bidder (ephemeral)...
-  await interaction.reply({
-    content:
-      `✅ Bid of **${formatCents(amountCents)}** placed on **#${auction.id} — ${auction.item_name}**. ` +
-      `You're the current high bidder!`,
-    flags: MessageFlags.Ephemeral,
-  });
+  // Confirm to the bidder (ephemeral).
+  const confirm = auction.group_mode
+    ? `✅ Bid of **${formatCents(amountCents)}** placed on group auction **${label}**. ` +
+      `You're currently in a winning slot (${db.getFilledSlots(auction)}/${auction.winners} filled). ` +
+      `Next minimum bid is **${formatCents(nextMin)}**.`
+    : `✅ Bid of **${formatCents(amountCents)}** placed on **${label}**. You're the current high bidder!`;
+  await interaction.reply({ content: confirm, flags: MessageFlags.Ephemeral });
 
-  // ...and refresh the public announcement embed, plus a short public note.
+  // Refresh the public announcement embed.
   await refreshAnnouncement(interaction, auction);
+
+  // Public note about the new bid.
   await interaction.channel
     ?.send({
-      content: `📈 <@${bidder.id}> bid **${formatCents(amountCents)}** on **#${auction.id} — ${auction.item_name}**.`,
+      content: `📈 <@${bidder.id}> bid **${formatCents(amountCents)}** on **${label}**.`,
       allowedMentions: { parse: [] },
     })
     .catch(() => {});
+
+  // In group mode, ping anyone who was displaced so they know to re-bid.
+  if (auction.group_mode && result.kicked) {
+    await interaction.channel
+      ?.send({
+        content:
+          `⚠️ <@${result.kicked.user_id}>, you were outbid on **${label}** and lost your slot. ` +
+          `Bid again (min **${formatCents(nextMin)}**) to reclaim one before it ends!`,
+        allowedMentions: { users: [result.kicked.user_id] },
+      })
+      .catch(() => {});
+  }
 }
 
 /** Edit the original announcement message so its high bid stays current. */

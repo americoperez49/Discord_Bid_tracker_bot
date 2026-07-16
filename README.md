@@ -13,7 +13,7 @@ autocomplete dropdown of the currently-active items.
 
 | Command | Who | What it does |
 | --- | --- | --- |
-| `/auction create item: starting_bid: duration: [description] [increment] [quantity]` | Moderator | List an item. `duration` looks like `2d12h`, `48h`, `90m`, `1w`. `increment` overrides the default $5 minimum raise. `quantity` (1–25, default 1) lists that many identical copies as separate auctions; when >1, each copy's name is suffixed `(1 of N)`, `(2 of N)`, … so they're easy to tell apart. |
+| `/auction create item: starting_bid: duration: [description] [increment] [quantity] [group_bidding] [winners]` | Moderator | List an item. `duration` looks like `2d12h`, `48h`, `90m`, `1w`. `increment` overrides the default $5 minimum raise. `quantity` (1–25, default 1) lists that many identical copies as separate auctions; when >1, each copy's name is suffixed `(1 of N)`, `(2 of N)`, … `group_bidding`/`winners` enable a single shared multi-winner auction — see below. |
 | `/bid item: amount:` | Anyone | Bid on an active auction. `item` autocompletes to active auctions; `amount` is dollars (`50`, `49.99`). |
 | `/auction list` | Anyone | List active auctions with current high bid and time left. |
 | `/auction info item:` | Anyone | Show one auction's details and recent bids. |
@@ -24,6 +24,17 @@ autocomplete dropdown of the currently-active items.
 | `/auction export [item:]` | Moderator | Download bids as a CSV. Omit `item` to export every auction in the server. |
 
 > Tip: the `/bid` dropdown shows each item's price inline — `Current Bid $30.00`, or `Starting Bid $25.00` when there are no bids yet — so you can bid without running `/auction list`.
+
+## Group (multi-winner) bidding
+
+Set `group_bidding: True` and `winners: N` on `/auction create` to run **one shared auction for N identical items** where the **top N bids all win** (one item each). Example: 4 cases of booster boxes → `starting_bid: 100`, `group_bidding: True`, `winners: 4`.
+
+Rules:
+- Each person may hold **one** active bid at a time. You can only bid again after being **outbid** (you can't bid against yourself).
+- While winner slots are still open, the minimum bid is the **starting bid** — up to N people can sit at the same amount.
+- Once all N slots are full, the minimum becomes **(lowest winning bid) + increment**. A qualifying bid displaces the **most recent** bidder at the lowest amount (LIFO), who gets pinged and can bid again.
+- Any amount at or above the minimum is allowed (you can jump higher, not just step by the increment).
+- The `/bid` dropdown shows `Min Bid $X (f/N winners)`, and when the auction ends all N winners are announced and flagged in the CSV export.
 
 "Moderator" = anyone with the **Manage Server** permission, or the role set in `MOD_ROLE_ID`.
 
