@@ -23,7 +23,7 @@ autocomplete dropdown of the currently-active items.
 | `/auction cleanup` | Moderator | Permanently delete all ended/cancelled auctions in the server at once (confirmation button); active auctions are untouched. |
 | `/auction export [item:]` | Moderator | Download bids as a CSV. Omit `item` to export every auction in the server. |
 
-> Tip: the `/bid` item dropdown shows each item's price and current leader inline — `Current Bid $300.00 (Sam)`, or `Starting Bid $25.00` when there are no bids yet — so you can bid without running `/auction list`. Once you've picked an item, the **amount** field suggests the next minimum bid as a one-tap value (e.g. `$305.00 — next minimum bid`); you can still type any amount.
+> Tip: the `/bid` item dropdown shows each item's price and current leader inline — `Current Bid $300.00 (Sam)`, or `Starting Bid $25.00` when there are no bids yet — so you can bid without running `/auction list`. Once you've picked an item, the **amount** field suggests the next minimum bid as a single one-tap value (e.g. `$305.00 — next minimum bid`); you can still type any amount.
 
 ## Group (multi-winner) bidding
 

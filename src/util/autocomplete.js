@@ -80,11 +80,10 @@ function centsToInputValue(cents) {
 }
 
 /**
- * Suggest bid amounts for the `amount` option: the next minimum bid (top) plus
- * a couple of higher increments, so the user can fill the field in one tap.
- * Since the suggestion depends on which auction is chosen, this reads the
- * already-selected `item` option; if none is chosen yet it offers no
- * suggestions (the user can still type a value freely).
+ * Suggest a single bid amount for the `amount` option: the next minimum bid,
+ * so the user can fill the field in one tap. Since the suggestion depends on
+ * which auction is chosen, this reads the already-selected `item` option; if
+ * none is chosen yet it offers no suggestion (the user can still type freely).
  *
  * @param {import('discord.js').AutocompleteInteraction} interaction
  */
@@ -98,13 +97,9 @@ async function respondWithBidAmounts(interaction) {
   }
 
   const minCents = db.nextMinBidCents(auction);
-  const inc = auction.min_increment_cents;
-  const choices = [minCents, minCents + inc, minCents + 2 * inc].map((cents, i) => ({
-    name: `${formatCents(cents)}${i === 0 ? ' — next minimum bid' : ''}`,
-    value: centsToInputValue(cents),
-  }));
-
-  await interaction.respond(choices);
+  await interaction.respond([
+    { name: `${formatCents(minCents)} — next minimum bid`, value: centsToInputValue(minCents) },
+  ]);
 }
 
 module.exports = { respondWithActiveAuctions, respondWithAllAuctions, respondWithBidAmounts };
