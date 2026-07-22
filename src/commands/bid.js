@@ -5,7 +5,7 @@ const db = require('../db');
 const { parseDollarsToCents, formatCents } = require('../util/money');
 const { discordRelativeTime } = require('../util/time');
 const { buildAuctionEmbed } = require('../util/embeds');
-const { respondWithActiveAuctions } = require('../util/autocomplete');
+const { respondWithActiveAuctions, respondWithBidAmounts } = require('../util/autocomplete');
 
 const data = new SlashCommandBuilder()
   .setName('bid')
@@ -20,12 +20,20 @@ const data = new SlashCommandBuilder()
   .addStringOption((opt) =>
     opt
       .setName('amount')
-      .setDescription('Your bid in dollars, e.g. 50 or 49.99')
-      .setRequired(true),
+      .setDescription('Your bid in dollars, e.g. 50 or 49.99 (suggests the next minimum bid)')
+      .setRequired(true)
+      .setAutocomplete(true),
   );
 
 async function autocomplete(interaction) {
-  await respondWithActiveAuctions(interaction);
+  // The command has two autocompleting options; respond based on which one the
+  // user is currently editing.
+  const focused = interaction.options.getFocused(true);
+  if (focused.name === 'amount') {
+    await respondWithBidAmounts(interaction);
+  } else {
+    await respondWithActiveAuctions(interaction);
+  }
 }
 
 async function execute(interaction) {
