@@ -13,14 +13,14 @@ const data = new SlashCommandBuilder()
   .addIntegerOption((opt) =>
     opt
       .setName('item')
-      .setDescription('The auction to bid on')
+      .setDescription('The auction to bid on (required)')
       .setRequired(true)
       .setAutocomplete(true),
   )
   .addStringOption((opt) =>
     opt
       .setName('amount')
-      .setDescription('Your bid in dollars, e.g. 50 or 49.99 (suggests the next minimum bid)')
+      .setDescription('Your bid in dollars, e.g. 50 or 49.99 — suggests the next minimum (required)')
       .setRequired(true)
       .setAutocomplete(true),
   );

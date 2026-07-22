@@ -36,44 +36,44 @@ const data = new SlashCommandBuilder()
       .setName('create')
       .setDescription('List a new item for auction (moderator only).')
       .addStringOption((o) =>
-        o.setName('item').setDescription('Name of the item').setRequired(true),
+        o.setName('item').setDescription('Name of the item (required)').setRequired(true),
       )
       .addStringOption((o) =>
         o
           .setName('starting_bid')
-          .setDescription('Starting bid in dollars, e.g. 25 or 25.00')
+          .setDescription('Starting bid in dollars, e.g. 25 or 25.00 (required)')
           .setRequired(true),
       )
       .addStringOption((o) =>
         o
           .setName('duration')
-          .setDescription('How long bidding stays open, e.g. 2d12h, 48h, 90m')
+          .setDescription('How long bidding stays open, e.g. 2d12h, 48h, 90m (required)')
           .setRequired(true),
       )
       .addStringOption((o) =>
-        o.setName('description').setDescription('Optional description of the item'),
+        o.setName('description').setDescription('Description of the item (optional)'),
       )
       .addStringOption((o) =>
         o
           .setName('increment')
-          .setDescription('Minimum raise over the current bid (default $5)'),
+          .setDescription('Minimum raise over the current bid, default $5 (optional)'),
       )
       .addIntegerOption((o) =>
         o
           .setName('quantity')
-          .setDescription('How many identical copies to list as separate auctions (default 1, max 25)')
+          .setDescription('Number of identical copies as separate auctions, default 1, max 25 (optional)')
           .setMinValue(1)
           .setMaxValue(25),
       )
       .addBooleanOption((o) =>
         o
           .setName('group_bidding')
-          .setDescription('One shared auction where the top N bids win (one bid per person). Set winners too.'),
+          .setDescription('One shared auction where the top N bids win; set winners too (optional)'),
       )
       .addIntegerOption((o) =>
         o
           .setName('winners')
-          .setDescription('Group bidding only: number of winning slots / items (2–25)')
+          .setDescription('Group bidding only: number of winning slots / items, 2–25 (optional)')
           .setMinValue(2)
           .setMaxValue(25),
       ),
@@ -86,7 +86,7 @@ const data = new SlashCommandBuilder()
       .setName('info')
       .setDescription('Show details and recent bids for an auction.')
       .addIntegerOption((o) =>
-        o.setName('item').setDescription('The auction').setRequired(true).setAutocomplete(true),
+        o.setName('item').setDescription('The auction (required)').setRequired(true).setAutocomplete(true),
       ),
   )
   .addSubcommand((sub) =>
@@ -94,7 +94,7 @@ const data = new SlashCommandBuilder()
       .setName('end')
       .setDescription('End an auction early (moderator only).')
       .addIntegerOption((o) =>
-        o.setName('item').setDescription('The auction').setRequired(true).setAutocomplete(true),
+        o.setName('item').setDescription('The auction (required)').setRequired(true).setAutocomplete(true),
       ),
   )
   .addSubcommand((sub) =>
@@ -102,7 +102,7 @@ const data = new SlashCommandBuilder()
       .setName('cancel')
       .setDescription('Cancel an auction with no winner (moderator only).')
       .addIntegerOption((o) =>
-        o.setName('item').setDescription('The auction').setRequired(true).setAutocomplete(true),
+        o.setName('item').setDescription('The auction (required)').setRequired(true).setAutocomplete(true),
       ),
   )
   .addSubcommand((sub) =>
@@ -110,7 +110,7 @@ const data = new SlashCommandBuilder()
       .setName('delete')
       .setDescription('Permanently delete an auction and its bids (moderator only).')
       .addIntegerOption((o) =>
-        o.setName('item').setDescription('The auction').setRequired(true).setAutocomplete(true),
+        o.setName('item').setDescription('The auction (required)').setRequired(true).setAutocomplete(true),
       ),
   )
   .addSubcommand((sub) =>
@@ -125,7 +125,7 @@ const data = new SlashCommandBuilder()
       .addIntegerOption((o) =>
         o
           .setName('item')
-          .setDescription('The auction (leave empty to export all auctions in this server)')
+          .setDescription('The auction; leave empty to export all auctions in this server (optional)')
           .setAutocomplete(true),
       ),
   );
