@@ -48,7 +48,11 @@ async function execute(interaction) {
     });
   }
 
-  const bidder = { id: interaction.user.id, username: interaction.user.username };
+  // Record the bidder's friendly display name (server nickname → global display
+  // name → account handle), not the raw account username.
+  const displayName =
+    interaction.member?.displayName ?? interaction.user.globalName ?? interaction.user.username;
+  const bidder = { id: interaction.user.id, username: displayName };
   const result = db.placeBid(auctionId, bidder, amountCents);
 
   if (!result.ok) {
