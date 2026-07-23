@@ -154,15 +154,21 @@ async function announceOutcome(auction, winners, status) {
 
   // Message 2 (after the embed): thank the non-winning bidders, pinging them.
   // Winners are excluded here — they already get the "Congrats" ping above.
+  // A trailing blank line (zero-width space) closes the group so consecutive
+  // auction announcements are visually separated.
   const winnerSet = new Set(winnerIds);
   const thankIds = [...new Set(allBids.map((b) => b.user_id))].filter((id) => !winnerSet.has(id));
+  const SPACER = '\n​';
   if (thankIds.length > 0) {
     const mentions = thankIds.map((id) => `<@${id}>`).join(' ');
     const note =
       status === 'cancelled'
         ? `❌ **Auction ${label}** was cancelled. Thanks to everyone who bid! ${mentions}`
         : `🎉 **Auction ${label}** has ended — thanks to everyone who bid! ${mentions}`;
-    await channel.send({ content: note, allowedMentions: { users: thankIds } });
+    await channel.send({ content: note + SPACER, allowedMentions: { users: thankIds } });
+  } else {
+    // No one to thank — still close the group with a blank line for spacing.
+    await channel.send({ content: '​', allowedMentions: { parse: [] } });
   }
 }
 
