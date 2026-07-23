@@ -4,7 +4,7 @@ const { SlashCommandBuilder, MessageFlags } = require('discord.js');
 const db = require('../db');
 const { parseDollarsToCents, formatCents } = require('../util/money');
 const { discordRelativeTime } = require('../util/time');
-const { buildAuctionEmbed } = require('../util/embeds');
+const { buildAuctionEmbed, buildBidFeedEmbed } = require('../util/embeds');
 const { respondWithActiveAuctions, respondWithBidAmounts } = require('../util/autocomplete');
 
 const data = new SlashCommandBuilder()
@@ -98,34 +98,30 @@ async function execute(interaction) {
   // Refresh the public announcement embed.
   await refreshAnnouncement(interaction, auction);
 
-  // Public note about the new bid.
-  await interaction.channel
-    ?.send({
-      content: `📈 <@${bidder.id}> bid **${formatCents(amountCents)}** on **${label}**.`,
-      allowedMentions: { parse: [] },
-    })
-    .catch(() => {});
-
-  // Ping whoever was outbid so they know they can bid again.
+  // Whoever was outbid (so we can ping them to bid again):
   //  - Group: the bidder displaced from a winning slot (if any).
   //  - Normal: the previous high bidder, unless it's the same person raising
   //    their own bid.
-  const outbidId = auction.group_mode
-    ? result.kicked?.user_id ?? null
+  const outbid = auction.group_mode
+    ? result.kicked ?? null
     : result.previousHigh && result.previousHigh.user_id !== bidder.id
-      ? result.previousHigh.user_id
+      ? result.previousHigh
       : null;
 
-  if (outbidId) {
-    const msg = auction.group_mode
-      ? `⚠️ <@${outbidId}>, you were outbid on **${label}** and lost your slot. ` +
-        `Bid again (min **${formatCents(nextMin)}**) to reclaim one before it ends!`
-      : `⚠️ <@${outbidId}>, you've been outbid on **${label}** — the high bid is now ` +
-        `**${formatCents(amountCents)}**. Bid again (min **${formatCents(nextMin)}**) before it ends!`;
-    await interaction.channel
-      ?.send({ content: msg, allowedMentions: { users: [outbidId] } })
-      .catch(() => {});
-  }
+  // One card per bid (keeps the feed readable), with the outbid ping — if any —
+  // in the message content, since embeds don't notify.
+  const embed = buildBidFeedEmbed(auction, bidder.username, amountCents, outbid);
+  const content = outbid
+    ? `⚠️ <@${outbid.user_id}> — you've been outbid, bid again to reclaim your spot!`
+    : undefined;
+
+  await interaction.channel
+    ?.send({
+      content,
+      embeds: [embed],
+      allowedMentions: outbid ? { users: [outbid.user_id] } : { parse: [] },
+    })
+    .catch(() => {});
 }
 
 /** Edit the original announcement message so its high bid stays current. */

@@ -122,4 +122,91 @@ function buildGroupEmbed(auction) {
   return embed;
 }
 
-module.exports = { buildAuctionEmbed };
+/**
+ * A compact card for a single accepted bid, for the live channel feed. Names are
+ * shown as display-name text (not mentions) so they always render and don't ping.
+ * The caller pings the outbid user via the message content, not this embed.
+ *
+ * @param {object} auction        the auction row (post-bid state)
+ * @param {string} bidderName     display name of the bidder
+ * @param {number} amountCents    the accepted bid amount
+ * @param {{username: string}|null} outbid  the displaced/previous leader bid row, if any
+ * @returns {EmbedBuilder}
+ */
+function buildBidFeedEmbed(auction, bidderName, amountCents, outbid) {
+  const embed = new EmbedBuilder()
+    .setColor(STATUS_COLORS.active)
+    .setTitle(`📈 New bid · #${auction.id} — ${auction.item_name}`.slice(0, 256))
+    .setDescription(`**${bidderName}** bid **${formatCents(amountCents)}**`);
+
+  if (auction.group_mode) {
+    embed.addFields({
+      name: 'Winning slots',
+      value: `${db.getFilledSlots(auction)}/${auction.winners} filled`,
+      inline: true,
+    });
+  }
+
+  embed.addFields(
+    { name: 'Next minimum bid', value: formatCents(db.nextMinBidCents(auction)), inline: true },
+    { name: 'Ends', value: discordRelativeTime(auction.end_time), inline: true },
+  );
+
+  if (outbid) {
+    embed.addFields({
+      name: auction.group_mode ? 'Lost a slot' : 'Outbid',
+      value: outbid.username,
+      inline: false,
+    });
+  }
+
+  return embed;
+}
+
+/**
+ * A card announcing an auction's outcome (ended or cancelled), for the channel.
+ * Winner/bidder names are shown as text; the caller pings the winner(s) via the
+ * message content.
+ *
+ * @param {object} auction   the finalised auction row
+ * @param {object[]} winners winning bid rows (0..N), highest first
+ * @param {object[]} allBids every bid on the auction (for the participant list)
+ * @param {'ended'|'cancelled'} status
+ * @returns {EmbedBuilder}
+ */
+function buildOutcomeEmbed(auction, winners, allBids, status) {
+  const label = `#${auction.id} — ${auction.item_name}`;
+  const embed = new EmbedBuilder().setColor(STATUS_COLORS[status] ?? STATUS_COLORS.ended);
+
+  if (status === 'cancelled') {
+    embed.setTitle(`❌ Auction ${label} was cancelled`.slice(0, 256));
+  } else {
+    embed.setTitle(`🏁 Auction ${label} has ended`.slice(0, 256));
+    if (winners.length === 0) {
+      embed.setDescription('No bids were placed.');
+    } else if (auction.group_mode) {
+      embed.addFields({
+        name: `🏆 Winners (${winners.length})`,
+        value: winners
+          .map((w, i) => `**${i + 1}.** ${w.username} — ${formatCents(w.amount_cents)}`)
+          .join('\n')
+          .slice(0, 1024),
+      });
+    } else {
+      embed.addFields({
+        name: '🏆 Winner',
+        value: `**${winners[0].username}** — ${formatCents(winners[0].amount_cents)}`,
+      });
+    }
+  }
+
+  // Unique participant names as plain text (no pings, no @unknown-user).
+  const names = [...new Map(allBids.map((b) => [b.user_id, b.username])).values()];
+  if (names.length > 0) {
+    embed.addFields({ name: 'Bidders', value: names.join(', ').slice(0, 1024) });
+  }
+
+  return embed;
+}
+
+module.exports = { buildAuctionEmbed, buildBidFeedEmbed, buildOutcomeEmbed };

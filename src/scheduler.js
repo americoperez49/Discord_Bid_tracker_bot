@@ -1,8 +1,7 @@
 'use strict';
 
 const db = require('./db');
-const { formatCents } = require('./util/money');
-const { buildAuctionEmbed } = require('./util/embeds');
+const { buildAuctionEmbed, buildOutcomeEmbed } = require('./util/embeds');
 
 // Backstop sweep interval: catches auctions whose setTimeout was lost, whose
 // timer exceeded the ~24.8-day setTimeout limit, or that expired while offline.
@@ -113,9 +112,10 @@ async function endAuction(auctionId, status = 'ended') {
 }
 
 /**
- * Edit the original announcement embed and post a result message that pings
- * everyone who bid. `winners` is an array: one entry for a normal auction, up
- * to `auction.winners` entries for a group auction.
+ * Edit the original announcement embed and post a single result card. Only the
+ * winner(s) are pinged (via the message content); all bidders are listed as
+ * plain text in the embed. `winners` is an array: one entry for a normal
+ * auction, up to `auction.winners` for a group auction.
  */
 async function announceOutcome(auction, winners, status) {
   const channel = await clientRef.channels.fetch(auction.channel_id).catch(() => null);
@@ -129,34 +129,20 @@ async function announceOutcome(auction, winners, status) {
     }
   }
 
-  const bidders = new Set(db.getBidsForAuction(auction.id).map((b) => b.user_id));
-  const mentions = [...bidders].map((id) => `<@${id}>`).join(' ');
-  const label = `#${auction.id} — ${auction.item_name}`;
+  const allBids = db.getBidsForAuction(auction.id);
+  const embed = buildOutcomeEmbed(auction, winners, allBids, status);
 
-  let content;
-  if (status === 'cancelled') {
-    content = `❌ **Auction ${label}** was cancelled.`;
-    if (mentions) content += `\n${mentions}`;
-  } else if (winners.length === 0) {
-    content = `🏁 **Auction ${label}** has ended with no bids.`;
-  } else if (auction.group_mode) {
-    const lines = winners
-      .map((w, i) => `**${i + 1}.** <@${w.user_id}> — ${formatCents(w.amount_cents)}`)
-      .join('\n');
-    content =
-      `🏁 **Group auction ${label}** has ended!\n` +
-      `🏆 **${winners.length} winner${winners.length === 1 ? '' : 's'}** (one item each):\n${lines}` +
-      (mentions ? `\n\nThanks to all bidders: ${mentions}` : '');
-  } else {
-    content =
-      `🏁 **Auction ${label}** has ended!\n` +
-      `🏆 Winner: <@${winners[0].user_id}> with **${formatCents(winners[0].amount_cents)}**.\n` +
-      (mentions ? `Thanks to all bidders: ${mentions}` : '');
-  }
+  // Ping only the winner(s); everyone else appears as text in the embed.
+  const winnerIds = status === 'ended' ? winners.map((w) => w.user_id) : [];
+  const content =
+    winnerIds.length > 0
+      ? `🏁 Congrats ${winnerIds.map((id) => `<@${id}>`).join(' ')}!`
+      : undefined;
 
   await channel.send({
     content,
-    allowedMentions: { users: [...bidders] },
+    embeds: [embed],
+    allowedMentions: { users: winnerIds },
   });
 }
 
