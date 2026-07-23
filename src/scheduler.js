@@ -130,20 +130,27 @@ async function announceOutcome(auction, winners, status) {
   }
 
   const allBids = db.getBidsForAuction(auction.id);
-  const embed = buildOutcomeEmbed(auction, winners, allBids, status);
+  const label = `#${auction.id} — ${auction.item_name}`;
+  const embed = buildOutcomeEmbed(auction, winners, status);
 
-  // Ping only the winner(s); everyone else appears as text in the embed.
+  // Message 1: a "Congrats @winner(s)" ping above the result embed.
   const winnerIds = status === 'ended' ? winners.map((w) => w.user_id) : [];
   const content =
     winnerIds.length > 0
       ? `🏁 Congrats ${winnerIds.map((id) => `<@${id}>`).join(' ')}!`
       : undefined;
+  await channel.send({ content, embeds: [embed], allowedMentions: { users: winnerIds } });
 
-  await channel.send({
-    content,
-    embeds: [embed],
-    allowedMentions: { users: winnerIds },
-  });
+  // Message 2 (after the embed): notify and thank every bidder, pinging them.
+  const bidderIds = [...new Set(allBids.map((b) => b.user_id))];
+  if (bidderIds.length > 0) {
+    const mentions = bidderIds.map((id) => `<@${id}>`).join(' ');
+    const note =
+      status === 'cancelled'
+        ? `❌ **Auction ${label}** was cancelled. Thanks to everyone who bid! ${mentions}`
+        : `🎉 **Auction ${label}** has ended — thanks to everyone who bid! ${mentions}`;
+    await channel.send({ content: note, allowedMentions: { users: bidderIds } });
+  }
 }
 
 /**

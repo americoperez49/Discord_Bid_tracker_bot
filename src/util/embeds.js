@@ -170,11 +170,10 @@ function buildBidFeedEmbed(auction, bidderName, amountCents, outbid) {
  *
  * @param {object} auction   the finalised auction row
  * @param {object[]} winners winning bid rows (0..N), highest first
- * @param {object[]} allBids every bid on the auction (for the participant list)
  * @param {'ended'|'cancelled'} status
  * @returns {EmbedBuilder}
  */
-function buildOutcomeEmbed(auction, winners, allBids, status) {
+function buildOutcomeEmbed(auction, winners, status) {
   const label = `#${auction.id} — ${auction.item_name}`;
   const embed = new EmbedBuilder().setColor(STATUS_COLORS[status] ?? STATUS_COLORS.ended);
 
@@ -198,12 +197,6 @@ function buildOutcomeEmbed(auction, winners, allBids, status) {
         value: `**${winners[0].username}** — ${formatCents(winners[0].amount_cents)}`,
       });
     }
-  }
-
-  // Unique participant names as plain text (no pings, no @unknown-user).
-  const names = [...new Map(allBids.map((b) => [b.user_id, b.username])).values()];
-  if (names.length > 0) {
-    embed.addFields({ name: 'Bidders', value: names.join(', ').slice(0, 1024) });
   }
 
   return embed;
