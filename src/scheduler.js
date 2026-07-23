@@ -9,6 +9,11 @@ const SWEEP_INTERVAL_MS = 15 * 1000;
 // setTimeout overflows past this; anything further out relies on the sweep.
 const MAX_TIMEOUT_MS = 2_147_483_000;
 
+// Leading blank line (zero-width space) prefixed to the first message of each
+// announcement group, so consecutive auction outcomes are visually separated.
+// Matches the same treatment used for the live bid feed.
+const LEADING_SPACER = '​\n';
+
 /** @type {Map<number, NodeJS.Timeout>} auctionId -> pending end timer */
 const timers = new Map();
 
@@ -123,10 +128,10 @@ async function endAuction(auctionId, status = 'ended') {
 }
 
 /**
- * Edit the original announcement embed and post a single result card. Only the
- * winner(s) are pinged (via the message content); all bidders are listed as
- * plain text in the embed. `winners` is an array: one entry for a normal
- * auction, up to `auction.winners` for a group auction.
+ * Edit the original announcement embed and post the result card. Only the
+ * winner(s) are pinged (above the embed); the non-winning bidders are thanked
+ * and pinged under it. `winners` is an array: one entry for a normal auction,
+ * up to `auction.winners` for a group auction.
  */
 async function announceOutcome(auction, winners, status) {
   const channel = await clientRef.channels.fetch(auction.channel_id).catch(() => null);
@@ -144,31 +149,25 @@ async function announceOutcome(auction, winners, status) {
   const label = `#${auction.id} — ${auction.item_name}`;
   const embed = buildOutcomeEmbed(auction, winners, status);
 
-  // Message 1: a "Congrats @winner(s)" ping above the result embed.
+  // Message 1: a leading blank line (separates this group from the previous),
+  // then a "Congrats @winner(s)" ping above the result embed.
   const winnerIds = status === 'ended' ? winners.map((w) => w.user_id) : [];
-  const content =
-    winnerIds.length > 0
-      ? `🏁 Congrats ${winnerIds.map((id) => `<@${id}>`).join(' ')}!`
-      : undefined;
+  const congrats =
+    winnerIds.length > 0 ? `🏁 Congrats ${winnerIds.map((id) => `<@${id}>`).join(' ')}!` : '';
+  const content = congrats ? `${LEADING_SPACER}${congrats}` : '​';
   await channel.send({ content, embeds: [embed], allowedMentions: { users: winnerIds } });
 
-  // Message 2 (after the embed): thank the non-winning bidders, pinging them.
-  // Winners are excluded here — they already get the "Congrats" ping above.
-  // A trailing blank line (zero-width space) closes the group so consecutive
-  // auction announcements are visually separated.
+  // Message 2 (under the embed): thank the non-winning bidders, pinging them.
+  // Winners are excluded — they already get the "Congrats" ping above.
   const winnerSet = new Set(winnerIds);
   const thankIds = [...new Set(allBids.map((b) => b.user_id))].filter((id) => !winnerSet.has(id));
-  const SPACER = '\n​';
   if (thankIds.length > 0) {
     const mentions = thankIds.map((id) => `<@${id}>`).join(' ');
     const note =
       status === 'cancelled'
         ? `❌ **Auction ${label}** was cancelled. Thanks to everyone who bid! ${mentions}`
         : `🎉 **Auction ${label}** has ended — thanks to everyone who bid! ${mentions}`;
-    await channel.send({ content: note + SPACER, allowedMentions: { users: thankIds } });
-  } else {
-    // No one to thank — still close the group with a blank line for spacing.
-    await channel.send({ content: '​', allowedMentions: { parse: [] } });
+    await channel.send({ content: note, allowedMentions: { users: thankIds } });
   }
 }
 
