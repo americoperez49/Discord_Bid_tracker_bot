@@ -109,11 +109,12 @@ async function execute(interaction) {
       : null;
 
   // One card per bid (keeps the feed readable), with the outbid ping — if any —
-  // in the message content, since embeds don't notify.
+  // in the message content, since embeds don't notify. A leading blank line
+  // (zero-width space) separates each card from the previous one.
   const embed = buildBidFeedEmbed(auction, bidder.username, amountCents, outbid);
   const content = outbid
-    ? `⚠️ <@${outbid.user_id}> — you've been outbid, bid again to reclaim your spot!`
-    : undefined;
+    ? `​\n⚠️ <@${outbid.user_id}> — you've been outbid, bid again to reclaim your spot!`
+    : '​';
 
   await interaction.channel
     ?.send({
