@@ -141,15 +141,17 @@ async function announceOutcome(auction, winners, status) {
       : undefined;
   await channel.send({ content, embeds: [embed], allowedMentions: { users: winnerIds } });
 
-  // Message 2 (after the embed): notify and thank every bidder, pinging them.
-  const bidderIds = [...new Set(allBids.map((b) => b.user_id))];
-  if (bidderIds.length > 0) {
-    const mentions = bidderIds.map((id) => `<@${id}>`).join(' ');
+  // Message 2 (after the embed): thank the non-winning bidders, pinging them.
+  // Winners are excluded here — they already get the "Congrats" ping above.
+  const winnerSet = new Set(winnerIds);
+  const thankIds = [...new Set(allBids.map((b) => b.user_id))].filter((id) => !winnerSet.has(id));
+  if (thankIds.length > 0) {
+    const mentions = thankIds.map((id) => `<@${id}>`).join(' ');
     const note =
       status === 'cancelled'
         ? `❌ **Auction ${label}** was cancelled. Thanks to everyone who bid! ${mentions}`
         : `🎉 **Auction ${label}** has ended — thanks to everyone who bid! ${mentions}`;
-    await channel.send({ content: note, allowedMentions: { users: bidderIds } });
+    await channel.send({ content: note, allowedMentions: { users: thankIds } });
   }
 }
 
