@@ -14,6 +14,17 @@ const timers = new Map();
 
 let clientRef = null;
 
+// Serialize outcome announcements. When several auctions end at the same moment
+// their endAuction() calls run concurrently; without this, each auction's two
+// messages (congrats + embed, then the thank-you) would interleave with other
+// auctions'. Chaining them keeps each auction's messages together and in order.
+let announceQueue = Promise.resolve();
+function enqueueAnnounce(task) {
+  const next = announceQueue.then(() => task());
+  announceQueue = next.catch(() => {}); // one failure must not break the chain
+  return next;
+}
+
 /**
  * Initialise the scheduler: end anything already overdue, reschedule the rest,
  * and start the periodic backstop sweep.
@@ -102,7 +113,7 @@ async function endAuction(auctionId, status = 'ended') {
 
   if (clientRef) {
     try {
-      await announceOutcome(auction, winners, status);
+      await enqueueAnnounce(() => announceOutcome(auction, winners, status));
     } catch (err) {
       console.error(`Failed to announce outcome for auction #${auctionId}:`, err);
     }
