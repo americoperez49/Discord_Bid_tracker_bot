@@ -147,10 +147,11 @@ function buildBidFeedEmbed(auction, bidderName, amountCents, outbid) {
     });
   }
 
-  embed.addFields(
-    { name: 'Next minimum bid', value: formatCents(db.nextMinBidCents(auction)), inline: true },
-    { name: 'Ends', value: discordRelativeTime(auction.end_time), inline: true },
-  );
+  embed.addFields({
+    name: 'Next minimum bid',
+    value: formatCents(db.nextMinBidCents(auction)),
+    inline: true,
+  });
 
   if (outbid) {
     embed.addFields({
