@@ -50,18 +50,20 @@ Rules:
 
 ### 2. Invite the bot to your server
 Under **OAuth2 → URL Generator**, tick scopes **`bot`** and **`applications.commands`**, and
-bot permissions **Send Messages**, **Embed Links**, and **Read Message History**. Open the
-generated URL and add the bot to your server. (Or replace `CLIENT_ID` in this URL:)
+bot permissions **Send Messages**, **Embed Links**, **Read Message History**, and
+**Manage Messages**. Open the generated URL and add the bot to your server. (Or replace
+`CLIENT_ID` in this URL:)
 
 ```
-https://discord.com/oauth2/authorize?client_id=CLIENT_ID&permissions=83968&scope=bot%20applications.commands
+https://discord.com/oauth2/authorize?client_id=CLIENT_ID&permissions=92160&scope=bot%20applications.commands
 ```
 
-> **Read Message History** is needed so the bot can fetch its own past messages to **edit**
-> them (live bid-total updates on the listing, and the "ending soon" reminder that becomes an
-> "ended" note when the auction closes). Editing/deleting its *own* messages needs no special
-> permission — "Manage Messages" is not required. The bot also needs these permissions in the
-> specific channel where auctions run, if that channel has permission overrides.
+> **Read Message History** lets the bot fetch its own past messages to **edit** them (live
+> bid-total updates, and the "ending soon" reminder that becomes an "ended" note at close).
+> **Manage Messages** lets it **pin** each new auction listing (auto-pinned on creation).
+> Editing/deleting its *own* messages needs no special permission. The bot needs these in the
+> specific channel where auctions run, if that channel has permission overrides. Without
+> Manage Messages the bot still works — it just can't pin, and says so when you create one.
 
 ### 3. Configure and install
 ```bash

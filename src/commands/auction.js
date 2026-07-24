@@ -234,6 +234,24 @@ async function execute(interaction) {
   }
 }
 
+/** Pin a message, returning whether it succeeded (needs Manage Messages). */
+async function tryPin(message) {
+  try {
+    await message.pin();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Trailing note appended to the create confirmation when pinning failed. */
+function pinFailureNote(pinned) {
+  return pinned
+    ? ''
+    : ` ⚠️ I couldn't pin the listing — grant me **Manage Messages** ` +
+        `(and check the channel isn't at Discord's 50-pin limit).`;
+}
+
 async function handleCreate(interaction) {
   const baseName = interaction.options.getString('item');
   const startingBidCents = parseDollarsToCents(interaction.options.getString('starting_bid'));
@@ -327,10 +345,12 @@ async function handleCreate(interaction) {
     db.setAuctionMessageId(auction.id, message.id);
     auction.message_id = message.id;
     scheduleAuctionEnd(auction);
+    const pinned = await tryPin(message);
 
     let content =
       `✅ Group auction **#${auction.id} — ${baseName}** created with **${winners} winner slots**. ` +
-      `Starting bid ${formatCents(startingBidCents)}, ends ${discordRelativeTime(endTime)}.${warnNote}`;
+      `Starting bid ${formatCents(startingBidCents)}, ends ${discordRelativeTime(endTime)}.${warnNote}` +
+      `${pinFailureNote(pinned)}`;
     if (quantity > 1) content += `\n_(quantity is ignored in group mode — winners controls the slots.)_`;
     await interaction.editReply({ content });
     return;
@@ -338,6 +358,7 @@ async function handleCreate(interaction) {
 
   // Normal mode: `quantity` independent auctions.
   const created = [];
+  let allPinned = true;
   for (let i = 1; i <= quantity; i++) {
     // When listing multiple copies, make each one's name distinct.
     const itemName = quantity > 1 ? `${baseName} (${i} of ${quantity})` : baseName;
@@ -350,16 +371,18 @@ async function handleCreate(interaction) {
     auction.message_id = message.id;
 
     scheduleAuctionEnd(auction);
+    if (!(await tryPin(message))) allPinned = false;
     created.push(auction);
   }
 
   const idList = created.map((a) => `#${a.id}`).join(', ');
   const content =
-    quantity > 1
+    (quantity > 1
       ? `✅ Created **${quantity}** auctions for **${baseName}** (${idList}). ` +
         `Starting bid ${formatCents(startingBidCents)} each, all end ${discordRelativeTime(endTime)}.${warnNote}`
       : `✅ Auction **${idList} — ${baseName}** created. ` +
-        `Starting bid ${formatCents(startingBidCents)}, ends ${discordRelativeTime(endTime)}.${warnNote}`;
+        `Starting bid ${formatCents(startingBidCents)}, ends ${discordRelativeTime(endTime)}.${warnNote}`) +
+    pinFailureNote(allPinned);
 
   await interaction.editReply({ content });
 }
