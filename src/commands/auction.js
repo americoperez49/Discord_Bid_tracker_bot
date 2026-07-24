@@ -681,6 +681,8 @@ async function handleExport(interaction) {
     'bid_placed_at_utc',
     'bid_placed_at_readable',
     'is_winning_bid',
+    'displaced_bidder',
+    'displaced_bid_amount',
   ];
 
   const rows = [];
@@ -694,7 +696,7 @@ async function handleExport(interaction) {
       .slice()
       .sort((x, y) => (x.placed_at < y.placed_at ? 1 : x.placed_at > y.placed_at ? -1 : 0));
     if (bids.length === 0) {
-      rows.push([a.id, a.item_name, type, slots, a.status, a.end_time, '', '(no bids)', '', '', '', '']);
+      rows.push([a.id, a.item_name, type, slots, a.status, a.end_time, '', '(no bids)', '', '', '', '', '', '']);
       continue;
     }
     for (const b of bids) {
@@ -705,6 +707,8 @@ async function handleExport(interaction) {
         (a.group_mode
           ? b.active === 1
           : a.winner_user_id === b.user_id && a.winning_amount_cents === b.amount_cents);
+      // Which bidder (if any) this bid knocked out of a winning slot when placed.
+      const displaced = b.displaced_bid_id != null ? db.getBid(b.displaced_bid_id) : null;
       rows.push([
         a.id,
         a.item_name,
@@ -718,6 +722,8 @@ async function handleExport(interaction) {
         b.placed_at,
         new Date(b.placed_at).toUTCString(),
         isWinning ? 'yes' : 'no',
+        displaced ? displaced.username : '',
+        displaced ? formatCents(displaced.amount_cents) : '',
       ]);
     }
   }
