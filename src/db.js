@@ -46,7 +46,17 @@ db.exec(`
     amount_cents INTEGER NOT NULL,
     placed_at   TEXT    NOT NULL,
     active      INTEGER NOT NULL DEFAULT 1,
-    displaced_bid_id INTEGER
+    displaced_bid_id INTEGER,
+    auto        INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE TABLE IF NOT EXISTS proxies (
+    auction_id  INTEGER NOT NULL REFERENCES auctions(id) ON DELETE CASCADE,
+    user_id     TEXT    NOT NULL,
+    username    TEXT    NOT NULL,
+    max_cents   INTEGER NOT NULL,
+    created_at  TEXT    NOT NULL,
+    PRIMARY KEY (auction_id, user_id)
   );
 
   CREATE INDEX IF NOT EXISTS idx_bids_auction ON bids(auction_id);
@@ -74,6 +84,8 @@ ensureColumn('auctions', 'warned', 'warned INTEGER NOT NULL DEFAULT 0');
 // Id of the posted reminder message, so it can be edited to a static "ended"
 // note once the auction closes (its live countdown would otherwise read "ago").
 ensureColumn('auctions', 'warn_message_id', 'warn_message_id TEXT');
+// Marks a bid the system placed automatically via a bidder's proxy (max) bid.
+ensureColumn('bids', 'auto', 'auto INTEGER NOT NULL DEFAULT 0');
 
 // Index on the (now-guaranteed) `active` column, after the migration above.
 db.exec(`CREATE INDEX IF NOT EXISTS idx_bids_active ON bids(auction_id, active);`);
@@ -110,8 +122,14 @@ const stmts = {
     SELECT * FROM bids WHERE auction_id = ? ORDER BY id DESC LIMIT ?
   `),
   insertBid: db.prepare(`
-    INSERT INTO bids (auction_id, user_id, username, amount_cents, placed_at, active)
-    VALUES (@auction_id, @user_id, @username, @amount_cents, @placed_at, @active)
+    INSERT INTO bids (auction_id, user_id, username, amount_cents, placed_at, active, auto)
+    VALUES (@auction_id, @user_id, @username, @amount_cents, @placed_at, @active, @auto)
+  `),
+  getProxy: db.prepare(`SELECT * FROM proxies WHERE auction_id = ? AND user_id = ?`),
+  upsertProxy: db.prepare(`
+    INSERT INTO proxies (auction_id, user_id, username, max_cents, created_at)
+    VALUES (@auction_id, @user_id, @username, @max_cents, @created_at)
+    ON CONFLICT(auction_id, user_id) DO UPDATE SET max_cents = @max_cents, username = @username
   `),
   finalizeAuction: db.prepare(`
     UPDATE auctions
@@ -260,38 +278,124 @@ function getFilledSlots(auction) {
 
 // --- Bidding ---------------------------------------------------------------
 
-/** Normal single-winner bid (append-only history; highest bid wins). */
-function normalBid(auction, bidder, amountCents, nowIso) {
-  const currentHigh = stmts.getHighestBid.get(auction.id) ?? null;
-  const requiredCents = currentHigh
-    ? currentHigh.amount_cents + auction.min_increment_cents
-    : auction.starting_bid_cents;
+/**
+ * Normal-auction bid with eBay-style proxy/max bidding.
+ *
+ * Every bid also records the bidder's proxy max (`maxCents`, at least their typed
+ * `amountCents`). The visible price and leader are resolved against the current
+ * leader's hidden max:
+ *  - If the challenger's max beats the incumbent's, the challenger becomes leader,
+ *    priced at incumbent-max + increment (capped at the challenger's max, floored
+ *    at their typed amount). The incumbent is outbid.
+ *  - Otherwise the incumbent auto-bids to challenger-max + increment (capped at
+ *    the incumbent max) and the challenger is outbid immediately.
+ * Ties on equal max go to the earlier proxy (the incumbent). Maxes stay private.
+ */
+function proxyBid(auction, bidder, amountCents, maxCents, nowIso) {
+  const inc = auction.min_increment_cents;
+  const high = stmts.getHighestBid.get(auction.id) ?? null;
+  const myMax = Math.max(maxCents ?? amountCents, amountCents);
 
+  const setProxy = (userId, username, max) => {
+    const existing = stmts.getProxy.get(auction.id, userId);
+    stmts.upsertProxy.run({
+      auction_id: auction.id,
+      user_id: userId,
+      username,
+      max_cents: max,
+      created_at: existing ? existing.created_at : nowIso,
+    });
+  };
+  const record = (userId, username, cents, auto) => {
+    const info = stmts.insertBid.run({
+      auction_id: auction.id,
+      user_id: userId,
+      username,
+      amount_cents: cents,
+      placed_at: nowIso,
+      active: 1,
+      auto: auto ? 1 : 0,
+    });
+    return {
+      id: Number(info.lastInsertRowid),
+      auction_id: auction.id,
+      user_id: userId,
+      username,
+      amount_cents: cents,
+      placed_at: nowIso,
+      auto: auto ? 1 : 0,
+    };
+  };
+
+  // Bidder is already leading — allow raising their (hidden) max only. Checked
+  // before the minimum, since you can raise your max without out-bidding yourself.
+  if (high && high.user_id === bidder.id) {
+    const existing = stmts.getProxy.get(auction.id, bidder.id);
+    const curMax = existing ? existing.max_cents : high.amount_cents;
+    if (myMax <= curMax) {
+      return { ok: false, reason: 'already_leading', currentCents: high.amount_cents };
+    }
+    setProxy(bidder.id, bidder.username, myMax);
+    return { ok: true, groupMode: false, selfRaise: true, leaderId: bidder.id, priceCents: high.amount_cents };
+  }
+
+  const requiredCents = high ? high.amount_cents + inc : auction.starting_bid_cents;
   if (amountCents < requiredCents) {
     return { ok: false, reason: 'too_low', requiredCents };
   }
 
-  const info = stmts.insertBid.run({
-    auction_id: auction.id,
-    user_id: bidder.id,
-    username: bidder.username,
-    amount_cents: amountCents,
-    placed_at: nowIso,
-    active: 1,
-  });
+  setProxy(bidder.id, bidder.username, myMax);
 
+  if (!high) {
+    const bid = record(bidder.id, bidder.username, amountCents, false);
+    return { ok: true, groupMode: false, leaderId: bidder.id, priceCents: amountCents, bid, auto: false };
+  }
+
+  const leaderId = high.user_id;
+  const leaderName = high.username;
+  const leaderProxy = stmts.getProxy.get(auction.id, leaderId);
+  const leaderMax = leaderProxy ? leaderProxy.max_cents : high.amount_cents;
+
+  if (myMax > leaderMax) {
+    // Incumbent's proxy is exhausted at its max (record it if that raises them).
+    if (leaderMax > high.amount_cents) {
+      record(leaderId, leaderName, leaderMax, true);
+    }
+    // Challenger wins; price just clears the incumbent's max (never below their typed bid).
+    let price = Math.min(myMax, leaderMax + inc);
+    if (price < amountCents) price = amountCents;
+    const auto = price !== amountCents;
+    const bid = record(bidder.id, bidder.username, price, auto);
+    return {
+      ok: true,
+      groupMode: false,
+      leaderId: bidder.id,
+      priceCents: price,
+      bid,
+      auto,
+      outbidUserId: leaderId,
+      outbidUsername: leaderName,
+    };
+  }
+
+  // Incumbent stays; auto-bid on their behalf just above the challenger's max.
+  const price = Math.min(leaderMax, myMax + inc);
+  // Record the challenger's (immediately-outbid) visible bid, unless it would tie
+  // the incumbent's resolved price (which would confuse leader ordering).
+  if (price > amountCents) {
+    record(bidder.id, bidder.username, amountCents, false);
+  }
+  const bid = record(leaderId, leaderName, price, true);
   return {
     ok: true,
     groupMode: false,
-    bid: {
-      id: Number(info.lastInsertRowid),
-      auction_id: auction.id,
-      user_id: bidder.id,
-      username: bidder.username,
-      amount_cents: amountCents,
-      placed_at: nowIso,
-    },
-    previousHigh: currentHigh,
+    leaderId,
+    priceCents: price,
+    bid,
+    auto: true,
+    challengerOutbid: true,
+    outbidUserId: bidder.id,
+    outbidUsername: bidder.username,
   };
 }
 
@@ -327,6 +431,7 @@ function groupBid(auction, bidder, amountCents, nowIso) {
     amount_cents: amountCents,
     placed_at: nowIso,
     active: 1,
+    auto: 0,
   });
 
   const bid = {
@@ -361,7 +466,7 @@ function groupBid(auction, bidder, amountCents, nowIso) {
  * @returns success `{ok:true, groupMode, bid, previousHigh?|kicked?, nextMinCents?}`
  *   or failure `{ok:false, reason, requiredCents?, currentCents?, endTime?, status?}`.
  */
-const placeBidTxn = db.transaction((auctionId, bidder, amountCents, nowIso) => {
+const placeBidTxn = db.transaction((auctionId, bidder, amountCents, maxCents, nowIso) => {
   const auction = stmts.getAuction.get(auctionId);
   if (!auction) return { ok: false, reason: 'not_found' };
   if (auction.status !== 'active') {
@@ -371,13 +476,14 @@ const placeBidTxn = db.transaction((auctionId, bidder, amountCents, nowIso) => {
     return { ok: false, reason: 'expired', endTime: auction.end_time };
   }
 
+  // max bids apply to normal auctions only; group auctions ignore maxCents.
   return auction.group_mode
     ? groupBid(auction, bidder, amountCents, nowIso)
-    : normalBid(auction, bidder, amountCents, nowIso);
+    : proxyBid(auction, bidder, amountCents, maxCents, nowIso);
 });
 
-function placeBid(auctionId, bidder, amountCents, nowIso = new Date().toISOString()) {
-  return placeBidTxn(auctionId, bidder, amountCents, nowIso);
+function placeBid(auctionId, bidder, amountCents, maxCents = null, nowIso = new Date().toISOString()) {
+  return placeBidTxn(auctionId, bidder, amountCents, maxCents, nowIso);
 }
 
 /**

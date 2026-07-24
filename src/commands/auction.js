@@ -741,6 +741,7 @@ async function handleExport(interaction) {
     'is_winning_bid',
     'displaced_bidder',
     'displaced_bid_amount',
+    'auto_bid',
   ];
 
   const rows = [];
@@ -754,7 +755,7 @@ async function handleExport(interaction) {
       .slice()
       .sort((x, y) => (x.placed_at < y.placed_at ? 1 : x.placed_at > y.placed_at ? -1 : 0));
     if (bids.length === 0) {
-      rows.push([a.id, a.item_name, type, slots, a.status, a.end_time, '', '(no bids)', '', '', '', '', '', '']);
+      rows.push([a.id, a.item_name, type, slots, a.status, a.end_time, '', '(no bids)', '', '', '', '', '', '', '']);
       continue;
     }
     for (const b of bids) {
@@ -782,6 +783,7 @@ async function handleExport(interaction) {
         isWinning ? 'yes' : 'no',
         displaced ? displaced.username : '',
         displaced ? formatCents(displaced.amount_cents) : '',
+        b.auto ? 'yes' : 'no',
       ]);
     }
   }

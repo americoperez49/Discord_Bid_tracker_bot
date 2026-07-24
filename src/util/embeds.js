@@ -128,16 +128,23 @@ function buildGroupEmbed(auction) {
  * The caller pings the outbid user via the message content, not this embed.
  *
  * @param {object} auction        the auction row (post-bid state)
- * @param {string} bidderName     display name of the bidder
- * @param {number} amountCents    the accepted bid amount
+ * @param {string} bidderName     display name of the current leader
+ * @param {number} amountCents    the accepted/resolved bid amount
  * @param {{username: string}|null} outbid  the displaced/previous leader bid row, if any
+ * @param {boolean} [auto=false]  whether this resulted from a proxy (max) auto-bid
  * @returns {EmbedBuilder}
  */
-function buildBidFeedEmbed(auction, bidderName, amountCents, outbid) {
+function buildBidFeedEmbed(auction, bidderName, amountCents, outbid, auto = false) {
   const embed = new EmbedBuilder()
     .setColor(STATUS_COLORS.active)
-    .setTitle(`📈 New bid · #${auction.id} — ${auction.item_name}`.slice(0, 256))
-    .setDescription(`**${bidderName}** bid **${formatCents(amountCents)}**`);
+    .setTitle(
+      `${auto ? '🤖 Auto-bid' : '📈 New bid'} · #${auction.id} — ${auction.item_name}`.slice(0, 256),
+    )
+    .setDescription(
+      auto
+        ? `**${bidderName}** now leads at **${formatCents(amountCents)}** (max bid)`
+        : `**${bidderName}** bid **${formatCents(amountCents)}**`,
+    );
 
   if (auction.group_mode) {
     embed.addFields({

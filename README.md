@@ -14,7 +14,7 @@ autocomplete dropdown of the currently-active items.
 | Command | Who | What it does |
 | --- | --- | --- |
 | `/auction create item: starting_bid: duration: [description] [increment] [quantity] [group_bidding] [winners]` | Moderator | List an item. `duration` looks like `2d12h`, `48h`, `90m`, `1w`. `increment` overrides the default $5 minimum raise. `quantity` (1–25, default 1) lists that many identical copies as separate auctions; when >1, each copy's name is suffixed `(1 of N)`, `(2 of N)`, … `group_bidding`/`winners` enable a single shared multi-winner auction — see below. `warn_before` (default `1h`) posts a no-ping "ending soon" reminder that long before the auction closes; skipped automatically if the auction is shorter than the lead time. |
-| `/bid item: amount:` | Anyone | Bid on an active auction. `item` autocompletes to active auctions; `amount` is dollars (`50`, `49.99`). |
+| `/bid item: amount: [max_bid:]` | Anyone | Bid on an active auction. `item` autocompletes to active auctions; `amount` is dollars (`50`, `49.99`). `max_bid` (normal auctions only) sets a hidden ceiling — the bot auto-bids up to it on your behalf when you're outbid. |
 | `/auction list` | Anyone | List active auctions with current high bid and time left. |
 | `/auction info item:` | Anyone | Show one auction's details and recent bids. |
 | `/auction end item:` | Moderator | End an auction immediately and announce the winner. |
@@ -26,6 +26,20 @@ autocomplete dropdown of the currently-active items.
 | `/auction export [item:]` | Moderator | Download bids as a CSV. Omit `item` to export every auction in the server. |
 
 > Tip: the `/bid` item dropdown shows each item's price and current leader inline — `Current Bid $300.00 (Sam)`, or `Starting Bid $25.00` when there are no bids yet — so you can bid without running `/auction list`. Once you've picked an item, the **amount** field suggests the next minimum bid as a single one-tap value (e.g. `$305.00 — next minimum bid`); you can still type any amount.
+
+## Max (proxy) bidding
+
+On a normal auction, pass `max_bid` to `/bid` to set a **hidden maximum**. The bot then
+bids the minimum needed to keep you in the lead, only going as high as your max:
+
+- If someone bids under your max, the bot **auto-bids** for you (the feed shows `🤖 Auto-bid`)
+  and the challenger is told they're outbid — you never overpay.
+- If two maxes collide, the **higher max wins**, priced just over the loser's max; equal maxes
+  go to whoever set theirs **first**.
+- If a bid exceeds your max, you're genuinely outbid and pinged. Your max is never shown
+  publicly. To raise your ceiling, `/bid` again with a higher `max_bid`.
+
+Max bids apply to **normal auctions only** — group auctions ignore `max_bid`.
 
 ## Group (multi-winner) bidding
 
