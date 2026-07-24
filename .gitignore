@@ -8,3 +8,6 @@ data/
 *.sqlite-journal
 *.sqlite-wal
 *.sqlite-shm
+
+# Local planning scratch
+Plan to fix Ooopsies.markdown
