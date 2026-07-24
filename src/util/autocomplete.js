@@ -117,15 +117,24 @@ async function respondWithBidders(interaction) {
     return;
   }
 
+  // For removebid on a group auction, show whether removing each bid would
+  // reinstate a previously-displaced bidder.
+  const showReinstate =
+    interaction.options.getSubcommand(false) === 'removebid' && auction.group_mode;
+
   const focused = interaction.options.getFocused()?.toString().toLowerCase() ?? '';
   const choices = db
     .getLatestBidsPerUser(auctionId)
     .filter((b) => focused === '' || b.username.toLowerCase().includes(focused))
     .slice(0, 25)
-    .map((b) => ({
-      name: `${b.username} — ${formatCents(b.amount_cents)}`.slice(0, 100),
-      value: b.id,
-    }));
+    .map((b) => {
+      let name = `${b.username} — ${formatCents(b.amount_cents)}`;
+      if (showReinstate) {
+        const r = db.reinstatementFor(b.id);
+        name += r ? ` · reinstates ${r.username}` : ' · reinstates no one';
+      }
+      return { name: name.slice(0, 100), value: b.id };
+    });
 
   await interaction.respond(choices);
 }

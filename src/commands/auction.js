@@ -581,9 +581,16 @@ async function handleRemoveBid(interaction) {
   if (error) return interaction.reply({ content: error, flags: MessageFlags.Ephemeral });
 
   const label = `#${auction.id} — ${auction.item_name}`;
-  const prompt =
+  let prompt =
     `🗑️ Remove **${bid.username}**'s bid of **${formatCents(bid.amount_cents)}** on **${label}**? ` +
     `This can't be undone.`;
+  // For group auctions, tell the mod up front whether this reinstates anyone.
+  if (auction.group_mode) {
+    const restored = db.reinstatementFor(bid.id);
+    prompt += restored
+      ? `\n↩️ This will reinstate **${restored.username}** (${formatCents(restored.amount_cents)}) to a winning slot.`
+      : `\n↩️ No bidder will be reinstated.`;
+  }
   const confirmation = await confirmDestructive(interaction, prompt, 'Remove bid');
   if (!confirmation) return;
 

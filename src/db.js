@@ -431,21 +431,34 @@ function getLatestBidsPerUser(auctionId) {
  * @returns {{auction: object, removed: object, restored: object|null}|null}
  *   null if the bid no longer exists.
  */
+/**
+ * Read-only preview: the bid that WOULD be reinstated to a winning slot if
+ * `bidId` were removed, or null if none. Only group-auction bids that are
+ * currently active and displaced someone reinstate anyone — and only if that
+ * displaced bid still exists, is inactive, and its user isn't already active.
+ * `removeBid` uses this so the preview and the actual result always agree.
+ * @param {number} bidId
+ * @returns {object|null}
+ */
+function reinstatementFor(bidId) {
+  const removed = stmts.getBid.get(bidId);
+  if (!removed) return null;
+  const auction = stmts.getAuction.get(removed.auction_id);
+  if (!auction?.group_mode || removed.active !== 1 || removed.displaced_bid_id == null) return null;
+  const displaced = stmts.getBid.get(removed.displaced_bid_id);
+  if (displaced && displaced.active === 0 && !stmts.getActiveBidForUser.get(auction.id, displaced.user_id)) {
+    return displaced;
+  }
+  return null;
+}
+
 const removeBidTxn = db.transaction((bidId) => {
   const removed = stmts.getBid.get(bidId);
   if (!removed) return null;
   const auction = stmts.getAuction.get(removed.auction_id);
 
-  let restored = null;
-  if (auction?.group_mode && removed.active === 1 && removed.displaced_bid_id != null) {
-    const displaced = stmts.getBid.get(removed.displaced_bid_id);
-    // Only restore if that bid still exists, is currently inactive, and its
-    // user isn't already holding an active bid.
-    if (displaced && displaced.active === 0 && !stmts.getActiveBidForUser.get(auction.id, displaced.user_id)) {
-      stmts.activateBid.run(displaced.id);
-      restored = stmts.getBid.get(displaced.id);
-    }
-  }
+  const restored = reinstatementFor(bidId);
+  if (restored) stmts.activateBid.run(restored.id);
 
   stmts.deleteBid.run(bidId);
   return { auction, removed, restored };
@@ -500,6 +513,7 @@ module.exports = {
   deleteFinishedAuctionsForGuild,
   getBid,
   getLatestBidsPerUser,
+  reinstatementFor,
   removeBid,
   editBidAmount,
 };
