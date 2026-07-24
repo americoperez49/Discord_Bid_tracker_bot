@@ -42,7 +42,8 @@ db.exec(`
     username    TEXT    NOT NULL,
     amount_cents INTEGER NOT NULL,
     placed_at   TEXT    NOT NULL,
-    active      INTEGER NOT NULL DEFAULT 1
+    active      INTEGER NOT NULL DEFAULT 1,
+    displaced_bid_id INTEGER
   );
 
   CREATE INDEX IF NOT EXISTS idx_bids_auction ON bids(auction_id);
@@ -61,6 +62,9 @@ function ensureColumn(table, column, ddl) {
 ensureColumn('auctions', 'group_mode', 'group_mode INTEGER NOT NULL DEFAULT 0');
 ensureColumn('auctions', 'winners', 'winners INTEGER NOT NULL DEFAULT 1');
 ensureColumn('bids', 'active', 'active INTEGER NOT NULL DEFAULT 1');
+// Records which bid a group bid displaced (LIFO), so a moderator removing that
+// bid can restore the bidder it knocked out of a winning slot.
+ensureColumn('bids', 'displaced_bid_id', 'displaced_bid_id INTEGER');
 
 // Index on the (now-guaranteed) `active` column, after the migration above.
 db.exec(`CREATE INDEX IF NOT EXISTS idx_bids_active ON bids(auction_id, active);`);
@@ -133,6 +137,19 @@ const stmts = {
      ORDER BY amount_cents ASC, placed_at DESC LIMIT 1
   `),
   deactivateBid: db.prepare(`UPDATE bids SET active = 0 WHERE id = ?`),
+  activateBid: db.prepare(`UPDATE bids SET active = 1 WHERE id = ?`),
+  setDisplacedBidId: db.prepare(`UPDATE bids SET displaced_bid_id = ? WHERE id = ?`),
+  getBid: db.prepare(`SELECT * FROM bids WHERE id = ?`),
+  deleteBid: db.prepare(`DELETE FROM bids WHERE id = ?`),
+  updateBidAmount: db.prepare(`UPDATE bids SET amount_cents = ? WHERE id = ?`),
+  // Each bidder's most recent bid on an auction (one row per user), for the
+  // moderator bidder picker.
+  getLatestBidsPerUser: db.prepare(`
+    SELECT b.* FROM bids b
+    JOIN (SELECT user_id, MAX(id) AS max_id FROM bids WHERE auction_id = ? GROUP BY user_id) m
+      ON b.id = m.max_id
+    ORDER BY b.amount_cents DESC, b.placed_at ASC
+  `),
 };
 
 /**
@@ -299,6 +316,9 @@ function groupBid(auction, bidder, amountCents, nowIso) {
   if (active.length + 1 > auction.winners) {
     kicked = stmts.getLowestActiveToKick.get(auction.id);
     stmts.deactivateBid.run(kicked.id);
+    // Remember who this bid displaced so it can be restored if the bid is
+    // later removed by a moderator.
+    stmts.setDisplacedBidId.run(kicked.id, bid.id);
   }
 
   return { ok: true, groupMode: true, bid, kicked, nextMinCents: nextMinBidCents(auction) };
@@ -391,6 +411,72 @@ function deleteFinishedAuctionsForGuild(guildId) {
   return rows;
 }
 
+/** A single bid row by id (or undefined). */
+function getBid(bidId) {
+  return stmts.getBid.get(bidId);
+}
+
+/** Each bidder's most recent bid on an auction — one row per user. */
+function getLatestBidsPerUser(auctionId) {
+  return stmts.getLatestBidsPerUser.all(auctionId);
+}
+
+/**
+ * Moderator: remove a single bid.
+ *  - Normal auction: just delete it (the next-highest bid becomes current).
+ *  - Group auction: if the removed bid was active and had displaced someone,
+ *    restore that bidder to their winning slot (unless they've since re-bid and
+ *    are active again).
+ * @param {number} bidId
+ * @returns {{auction: object, removed: object, restored: object|null}|null}
+ *   null if the bid no longer exists.
+ */
+const removeBidTxn = db.transaction((bidId) => {
+  const removed = stmts.getBid.get(bidId);
+  if (!removed) return null;
+  const auction = stmts.getAuction.get(removed.auction_id);
+
+  let restored = null;
+  if (auction?.group_mode && removed.active === 1 && removed.displaced_bid_id != null) {
+    const displaced = stmts.getBid.get(removed.displaced_bid_id);
+    // Only restore if that bid still exists, is currently inactive, and its
+    // user isn't already holding an active bid.
+    if (displaced && displaced.active === 0 && !stmts.getActiveBidForUser.get(auction.id, displaced.user_id)) {
+      stmts.activateBid.run(displaced.id);
+      restored = stmts.getBid.get(displaced.id);
+    }
+  }
+
+  stmts.deleteBid.run(bidId);
+  return { auction, removed, restored };
+});
+
+function removeBid(bidId) {
+  return removeBidTxn(bidId);
+}
+
+/**
+ * Moderator: set a bid's amount. Group auctions keep the bid in place (winning
+ * bids stay winning at the corrected amount; kicked bidders are not re-admitted).
+ * @param {number} bidId
+ * @param {number} newAmountCents
+ * @returns {{auction: object, bid: object, oldAmountCents: number}|null}
+ */
+const editBidAmountTxn = db.transaction((bidId, newAmountCents) => {
+  const before = stmts.getBid.get(bidId);
+  if (!before) return null;
+  stmts.updateBidAmount.run(newAmountCents, bidId);
+  return {
+    auction: stmts.getAuction.get(before.auction_id),
+    bid: stmts.getBid.get(bidId),
+    oldAmountCents: before.amount_cents,
+  };
+});
+
+function editBidAmount(bidId, newAmountCents) {
+  return editBidAmountTxn(bidId, newAmountCents);
+}
+
 module.exports = {
   db,
   DB_PATH,
@@ -412,4 +498,8 @@ module.exports = {
   deleteAuction,
   getFinishedAuctionsForGuild,
   deleteFinishedAuctionsForGuild,
+  getBid,
+  getLatestBidsPerUser,
+  removeBid,
+  editBidAmount,
 };

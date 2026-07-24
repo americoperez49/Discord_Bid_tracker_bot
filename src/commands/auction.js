@@ -21,7 +21,11 @@ const {
 const { buildAuctionEmbed } = require('../util/embeds');
 const { buildCsv } = require('../util/csv');
 const { isModerator } = require('../util/permissions');
-const { respondWithActiveAuctions, respondWithAllAuctions } = require('../util/autocomplete');
+const {
+  respondWithActiveAuctions,
+  respondWithAllAuctions,
+  respondWithBidders,
+} = require('../util/autocomplete');
 const { scheduleAuctionEnd, endAuction, cancelScheduled } = require('../scheduler');
 
 const DEFAULT_INCREMENT_CENTS = 500; // $5
@@ -120,6 +124,50 @@ const data = new SlashCommandBuilder()
   )
   .addSubcommand((sub) =>
     sub
+      .setName('removebid')
+      .setDescription('Remove a specific bidder\'s bid from an auction (moderator only).')
+      .addIntegerOption((o) =>
+        o
+          .setName('item')
+          .setDescription('The auction (required)')
+          .setRequired(true)
+          .setAutocomplete(true),
+      )
+      .addIntegerOption((o) =>
+        o
+          .setName('bidder')
+          .setDescription('The bidder whose bid to remove (required)')
+          .setRequired(true)
+          .setAutocomplete(true),
+      ),
+  )
+  .addSubcommand((sub) =>
+    sub
+      .setName('editbid')
+      .setDescription('Correct the amount of a bidder\'s bid (moderator only).')
+      .addIntegerOption((o) =>
+        o
+          .setName('item')
+          .setDescription('The auction (required)')
+          .setRequired(true)
+          .setAutocomplete(true),
+      )
+      .addIntegerOption((o) =>
+        o
+          .setName('bidder')
+          .setDescription('The bidder whose bid to edit (required)')
+          .setRequired(true)
+          .setAutocomplete(true),
+      )
+      .addStringOption((o) =>
+        o
+          .setName('amount')
+          .setDescription('The corrected bid in dollars, e.g. 300 or 299.99 (required)')
+          .setRequired(true),
+      ),
+  )
+  .addSubcommand((sub) =>
+    sub
       .setName('export')
       .setDescription('Download the bid list as a CSV (moderator only).')
       .addIntegerOption((o) =>
@@ -132,7 +180,10 @@ const data = new SlashCommandBuilder()
 
 async function autocomplete(interaction) {
   const sub = interaction.options.getSubcommand();
-  if (sub === 'export' || sub === 'delete') {
+  const focused = interaction.options.getFocused(true);
+  if (focused.name === 'bidder') {
+    await respondWithBidders(interaction);
+  } else if (sub === 'export' || sub === 'delete') {
     await respondWithAllAuctions(interaction);
   } else {
     await respondWithActiveAuctions(interaction);
@@ -143,7 +194,7 @@ async function execute(interaction) {
   const sub = interaction.options.getSubcommand();
 
   // Runtime moderator gate for privileged subcommands.
-  const modOnly = ['create', 'end', 'cancel', 'export', 'delete', 'cleanup'];
+  const modOnly = ['create', 'end', 'cancel', 'export', 'delete', 'cleanup', 'removebid', 'editbid'];
   if (modOnly.includes(sub) && !isModerator(interaction.member)) {
     return interaction.reply({
       content: '🚫 You need the moderator role (or "Manage Server") to use this command.',
@@ -164,6 +215,10 @@ async function execute(interaction) {
       return handleCancel(interaction);
     case 'delete':
       return handleDelete(interaction);
+    case 'removebid':
+      return handleRemoveBid(interaction);
+    case 'editbid':
+      return handleEditBid(interaction);
     case 'cleanup':
       return handleCleanup(interaction);
     case 'export':
@@ -488,6 +543,106 @@ async function handleCleanup(interaction) {
     content: `🧹 Deleted **${removed.length}** finished auction(s). Their old listing messages remain as a record.`,
     components: [],
   });
+}
+
+/** Edit the auction's announcement message so its embed reflects current state. */
+async function refreshAnnouncement(interaction, auction) {
+  if (!auction?.message_id) return;
+  try {
+    const channel =
+      auction.channel_id === interaction.channelId
+        ? interaction.channel
+        : await interaction.client.channels.fetch(auction.channel_id).catch(() => null);
+    if (!channel?.isTextBased()) return;
+    const msg = await channel.messages.fetch(auction.message_id).catch(() => null);
+    if (msg) await msg.edit({ embeds: [buildAuctionEmbed(auction)] });
+  } catch {
+    /* non-fatal */
+  }
+}
+
+/** Resolve and validate the auction + selected bid for a mod bid command. */
+function resolveAuctionAndBid(interaction) {
+  const auctionId = interaction.options.getInteger('item');
+  const bidId = interaction.options.getInteger('bidder');
+  const auction = db.getAuction(auctionId);
+  if (!auction || auction.guild_id !== interaction.guildId) {
+    return { error: `⚠️ Auction #${auctionId} not found in this server.` };
+  }
+  const bid = db.getBid(bidId);
+  if (!bid || bid.auction_id !== auctionId) {
+    return { error: '⚠️ That bid was not found on this auction. Pick the bidder from the list.' };
+  }
+  return { auction, bid };
+}
+
+async function handleRemoveBid(interaction) {
+  const { auction, bid, error } = resolveAuctionAndBid(interaction);
+  if (error) return interaction.reply({ content: error, flags: MessageFlags.Ephemeral });
+
+  const label = `#${auction.id} — ${auction.item_name}`;
+  const prompt =
+    `🗑️ Remove **${bid.username}**'s bid of **${formatCents(bid.amount_cents)}** on **${label}**? ` +
+    `This can't be undone.`;
+  const confirmation = await confirmDestructive(interaction, prompt, 'Remove bid');
+  if (!confirmation) return;
+
+  const result = db.removeBid(bid.id);
+  await confirmation.update({
+    content: `🗑️ Removed **${bid.username}**'s bid of ${formatCents(bid.amount_cents)}.`,
+    components: [],
+  });
+
+  await refreshAnnouncement(interaction, db.getAuction(auction.id));
+
+  const restoredNote = result?.restored
+    ? ` **${result.restored.username}** is back in a winning slot.`
+    : '';
+  await interaction.channel
+    ?.send({
+      content:
+        `🛠️ A moderator removed **${bid.username}**'s bid of ` +
+        `**${formatCents(bid.amount_cents)}** on **${label}**.${restoredNote}`,
+      allowedMentions: { parse: [] },
+    })
+    .catch(() => {});
+}
+
+async function handleEditBid(interaction) {
+  const { auction, bid, error } = resolveAuctionAndBid(interaction);
+  if (error) return interaction.reply({ content: error, flags: MessageFlags.Ephemeral });
+
+  const newCents = parseDollarsToCents(interaction.options.getString('amount'));
+  if (newCents === null || newCents <= 0) {
+    return interaction.reply({
+      content: '⚠️ Amount must be a positive dollar value, e.g. `300` or `299.99`.',
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+
+  const label = `#${auction.id} — ${auction.item_name}`;
+  const prompt =
+    `✏️ Change **${bid.username}**'s bid on **${label}** from ` +
+    `**${formatCents(bid.amount_cents)}** to **${formatCents(newCents)}**?`;
+  const confirmation = await confirmDestructive(interaction, prompt, 'Update bid');
+  if (!confirmation) return;
+
+  const result = db.editBidAmount(bid.id, newCents);
+  await confirmation.update({
+    content: `✏️ Updated **${bid.username}**'s bid to ${formatCents(newCents)}.`,
+    components: [],
+  });
+
+  await refreshAnnouncement(interaction, db.getAuction(auction.id));
+
+  await interaction.channel
+    ?.send({
+      content:
+        `🛠️ A moderator changed **${bid.username}**'s bid on **${label}** from ` +
+        `**${formatCents(result.oldAmountCents)}** to **${formatCents(newCents)}**.`,
+      allowedMentions: { parse: [] },
+    })
+    .catch(() => {});
 }
 
 async function handleExport(interaction) {

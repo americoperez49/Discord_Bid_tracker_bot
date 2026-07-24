@@ -102,4 +102,37 @@ async function respondWithBidAmounts(interaction) {
   ]);
 }
 
-module.exports = { respondWithActiveAuctions, respondWithAllAuctions, respondWithBidAmounts };
+/**
+ * Suggest bidders for the moderator remove/edit commands: one entry per bidder
+ * on the already-selected `item` auction, shown as "Name — $amount". The choice
+ * value is that bidder's most-recent bid id, so the command targets an exact bid.
+ *
+ * @param {import('discord.js').AutocompleteInteraction} interaction
+ */
+async function respondWithBidders(interaction) {
+  const auctionId = interaction.options.getInteger('item');
+  const auction = auctionId != null ? db.getAuction(auctionId) : null;
+  if (!auction || auction.guild_id !== interaction.guildId) {
+    await interaction.respond([]);
+    return;
+  }
+
+  const focused = interaction.options.getFocused()?.toString().toLowerCase() ?? '';
+  const choices = db
+    .getLatestBidsPerUser(auctionId)
+    .filter((b) => focused === '' || b.username.toLowerCase().includes(focused))
+    .slice(0, 25)
+    .map((b) => ({
+      name: `${b.username} — ${formatCents(b.amount_cents)}`.slice(0, 100),
+      value: b.id,
+    }));
+
+  await interaction.respond(choices);
+}
+
+module.exports = {
+  respondWithActiveAuctions,
+  respondWithAllAuctions,
+  respondWithBidAmounts,
+  respondWithBidders,
+};
