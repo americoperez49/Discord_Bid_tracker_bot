@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Discord Bid Tracker Bot — Moderator Guide</title>
+    <style>
+      :root {
+        --bg: #f6f7f9;
+        --card: #ffffff;
+        --text: #1f2328;
+        --muted: #57606a;
+        --border: #d7dbe0;
+        --accent: #5865f2; /* Discord blurple */
+        --code-bg: #eef0f3;
+        --code-text: #24292f;
+        --row-alt: #fafbfc;
+        --tip-bg: #eef1fe;
+        --tip-border: #5865f2;
+        --mod-bg: #e7e9fd;
+        --mod-text: #3b41c5;
+        --any-bg: #e3f5ea;
+        --any-text: #1a7f43;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #1a1c1f;
+          --card: #24272c;
+          --text: #e6e8eb;
+          --muted: #9aa4af;
+          --border: #3a3f46;
+          --accent: #808aff;
+          --code-bg: #2f333a;
+          --code-text: #e6e8eb;
+          --row-alt: #2a2e34;
+          --tip-bg: #23283f;
+          --tip-border: #808aff;
+          --mod-bg: #2e3160;
+          --mod-text: #b9bdff;
+          --any-bg: #1e3a2b;
+          --any-text: #7ee0a3;
+        }
+      }
+
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        line-height: 1.6;
+        font-size: 16px;
+      }
+      .wrap { max-width: 900px; margin: 0 auto; padding: 32px 20px 80px; }
+
+      header.hero {
+        background: linear-gradient(135deg, var(--accent), #7d3cff);
+        color: #fff;
+        border-radius: 14px;
+        padding: 28px 28px 24px;
+        margin-bottom: 28px;
+      }
+      header.hero h1 { margin: 0 0 8px; font-size: 1.7rem; }
+      header.hero p { margin: 0; opacity: 0.95; }
+      header.hero .lede { font-size: 1.02rem; }
+
+      h2 {
+        font-size: 1.3rem;
+        margin: 34px 0 12px;
+        padding-bottom: 6px;
+        border-bottom: 2px solid var(--border);
+      }
+      h3 { font-size: 1.05rem; margin: 20px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+
+      a { color: var(--accent); }
+
+      code {
+        background: var(--code-bg);
+        color: var(--code-text);
+        padding: 1px 6px;
+        border-radius: 5px;
+        font-family: "SF Mono", "Cascadia Code", Consolas, "Liberation Mono", Menlo, monospace;
+        font-size: 0.88em;
+        white-space: nowrap;
+      }
+
+      .toc {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 14px 20px;
+        margin-bottom: 8px;
+      }
+      .toc strong { display: block; margin-bottom: 6px; color: var(--muted); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; }
+      .toc ul { margin: 0; padding-left: 18px; columns: 2; }
+      @media (max-width: 560px) { .toc ul { columns: 1; } }
+
+      .table-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; }
+      table { width: 100%; border-collapse: collapse; background: var(--card); min-width: 620px; }
+      th, td { text-align: left; padding: 11px 14px; vertical-align: top; border-bottom: 1px solid var(--border); }
+      th { background: var(--code-bg); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+      tr:last-child td { border-bottom: none; }
+      tbody tr:nth-child(even) { background: var(--row-alt); }
+      td:first-child code { white-space: normal; }
+
+      .badge {
+        display: inline-block;
+        font-size: 0.72rem;
+        font-weight: 700;
+        padding: 2px 9px;
+        border-radius: 999px;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        white-space: nowrap;
+      }
+      .badge.mod { background: var(--mod-bg); color: var(--mod-text); }
+      .badge.any { background: var(--any-bg); color: var(--any-text); }
+
+      .callout {
+        background: var(--tip-bg);
+        border-left: 4px solid var(--tip-border);
+        border-radius: 8px;
+        padding: 12px 16px;
+        margin: 16px 0;
+      }
+      .callout .label { font-weight: 700; margin-right: 4px; }
+
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 4px 22px 14px;
+        margin: 14px 0;
+      }
+      ul.spaced li { margin: 7px 0; }
+
+      footer { margin-top: 40px; color: var(--muted); font-size: 0.9rem; border-top: 1px solid var(--border); padding-top: 16px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="hero">
+        <h1>🏷️ Discord Bid Tracker Bot</h1>
+        <p class="lede">
+          A Discord bot for running <strong>item auctions</strong>. A moderator lists an item with a
+          starting bid and a closing time; members bid via slash commands; every bid must be at least
+          <strong>$5 higher</strong> than the current high bid (the first bid may equal the starting bid).
+          The bot records who bid, how much, and the exact time, announces the winner when the auction
+          closes, and lets a moderator download the full bid list as a CSV.
+        </p>
+      </header>
+
+      <p>
+        Multiple auctions can run at the same time — each has its own short ID, and <code>/bid</code>
+        offers an autocomplete dropdown of the currently-active items.
+      </p>
+
+      <nav class="toc">
+        <strong>On this page</strong>
+        <ul>
+          <li><a href="#commands">Commands</a></li>
+          <li><a href="#creating">Creating an auction</a></li>
+          <li><a href="#maxbid">Max (proxy) bidding</a></li>
+          <li><a href="#group">Group (multi-winner) bidding</a></li>
+        </ul>
+      </nav>
+
+      <h2 id="commands">Commands</h2>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr><th>Command</th><th>Who</th><th>What it does</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>/auction cancel item:</code></td>
+              <td><span class="badge mod">Moderator</span></td>
+              <td>Cancel an auction (no winner).</td>
+            </tr>
+            <tr>
+              <td><code>/auction cleanup</code></td>
+              <td><span class="badge mod">Moderator</span></td>
+              <td>Permanently delete all ended/cancelled auctions in the server at once (confirmation button); active auctions are untouched.</td>
+            </tr>
+            <tr>
+              <td><code>/auction create …</code></td>
+              <td><span class="badge mod">Moderator</span></td>
+              <td>List an item for auction. Options are detailed under <a href="#creating">Creating an auction</a> below.</td>
+            </tr>
+            <tr>
+              <td><code>/auction delete item:</code></td>
+              <td><span class="badge mod">Moderator</span></td>
+              <td>Permanently delete one auction and its bids (with a confirmation button); also removes its listing message.</td>
+            </tr>
+            <tr>
+              <td><code>/auction editbid item: bidder: amount:</code></td>
+              <td><span class="badge mod">Moderator</span></td>
+              <td>Correct a bidder's bid amount (same dropdown + confirmation). In a group auction the bid stays in its slot at the corrected amount.</td>
+            </tr>
+            <tr>
+              <td><code>/auction end item:</code></td>
+              <td><span class="badge mod">Moderator</span></td>
+              <td>End an auction immediately and announce the winner.</td>
+            </tr>
+            <tr>
+              <td><code>/auction export [item:]</code></td>
+              <td><span class="badge mod">Moderator</span></td>
+              <td>Download bids as a CSV. Omit <code>item</code> to export every auction in the server.</td>
+            </tr>
+            <tr>
+              <td><code>/auction info item:</code></td>
+              <td><span class="badge mod">Moderator</span></td>
+              <td>Show one auction's details and recent bids.</td>
+            </tr>
+            <tr>
+              <td><code>/auction list</code></td>
+              <td><span class="badge mod">Moderator</span></td>
+              <td>List active auctions with current high bid and time left.</td>
+            </tr>
+            <tr>
+              <td><code>/auction removebid item: bidder:</code></td>
+              <td><span class="badge mod">Moderator</span></td>
+              <td>Remove a specific bidder's bid (pick the bidder from a <code>Name — $amount</code> dropdown; confirmation button). In a group auction, restores whoever that bid had knocked out of a winning slot.</td>
+            </tr>
+            <tr>
+              <td><code>/bid item: amount: [max_bid:]</code></td>
+              <td><span class="badge any">Anyone</span></td>
+              <td>Bid on an active auction. <code>item</code> autocompletes to active auctions; <code>amount</code> is dollars (<code>50</code>, <code>49.99</code>). <code>max_bid</code> (normal auctions only) sets a hidden ceiling — the bot auto-bids up to it on your behalf when you're outbid.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout">
+        <span class="label">💡 Tip:</span>
+        the <code>/bid</code> item dropdown shows each item's price and current leader inline —
+        <code>Current Bid $300.00 (Sam)</code>, or <code>Starting Bid $25.00</code> when there are no
+        bids yet — so you can bid without running <code>/auction list</code>. Once you've picked an item,
+        the <strong>amount</strong> field suggests the next minimum bid as a single one-tap value
+        (e.g. <code>$305.00 — next minimum bid</code>); you can still type any amount.
+      </div>
+
+      <h2 id="creating">Creating an auction</h2>
+      <p><code>/auction create</code> takes these options:</p>
+      <div class="card">
+        <h3>Required</h3>
+        <ul class="spaced">
+          <li><strong><code>item</code></strong> — the item's name.</li>
+          <li><strong><code>starting_bid</code></strong> — opening price in dollars (e.g. <code>25</code>, <code>25.00</code>).</li>
+          <li><strong><code>duration</code></strong> — how long bidding stays open: <code>2d12h</code>, <code>48h</code>, <code>90m</code>, <code>1w</code>, etc.</li>
+        </ul>
+        <h3>Optional</h3>
+        <ul class="spaced">
+          <li><strong><code>description</code></strong> — a short blurb shown on the listing.</li>
+          <li><strong><code>increment</code></strong> — minimum raise over the current bid (default <strong>$5</strong>).</li>
+          <li><strong><code>quantity</code></strong> — 1–25 (default 1). Lists that many identical copies as separate auctions; when &gt;1, each copy's name is suffixed <code>(1 of N)</code>, <code>(2 of N)</code>, …</li>
+          <li><strong><code>group_bidding</code></strong> + <strong><code>winners</code></strong> — run one shared multi-winner auction instead (see <a href="#group">Group (multi-winner) bidding</a>).</li>
+          <li><strong><code>warn_before</code></strong> — default <strong>1h</strong>. Posts a no-ping "ending soon" reminder that long before the auction closes; skipped automatically if the auction is shorter than the lead time.</li>
+        </ul>
+      </div>
+
+      <h2 id="maxbid">Max (proxy) bidding</h2>
+      <p>
+        On a normal auction, pass <code>max_bid</code> to <code>/bid</code> to set a
+        <strong>hidden maximum</strong>. The bot then bids the minimum needed to keep you in the lead,
+        only going as high as your max:
+      </p>
+      <ul class="spaced">
+        <li>If someone bids under your max, the bot <strong>auto-bids</strong> for you (the feed shows <code>🤖 Auto-bid</code>) and the challenger is told they're outbid — you never overpay.</li>
+        <li>If two maxes collide, the <strong>higher max wins</strong>, priced just over the loser's max; equal maxes go to whoever set theirs <strong>first</strong>.</li>
+        <li>If a bid exceeds your max, you're genuinely outbid and pinged. Your max is never shown publicly. To raise your ceiling, <code>/bid</code> again with a higher <code>max_bid</code>.</li>
+      </ul>
+      <p>
+        Max bids work in <strong>group auctions</strong> too: if you're displaced from a winning slot,
+        the bot auto-bids the minimum needed to reclaim one, up to your max — a whole displacement war
+        resolves instantly and is posted as a single <code>🤖 Auto-bids resolved …</code> summary (only
+        knocked-out bidders are pinged). Every step is still recorded individually in the CSV export
+        (flagged <code>auto_bid</code>, with who each bid displaced), so you get the full blow-by-blow history.
+      </p>
+
+      <h2 id="group">Group (multi-winner) bidding</h2>
+      <p>
+        Set <code>group_bidding: True</code> and <code>winners: N</code> on <code>/auction create</code>
+        to run <strong>one shared auction for N identical items</strong> where the <strong>top N bids all
+        win</strong> (one item each). Example: 4 cases of booster boxes →
+        <code>starting_bid: 100</code>, <code>group_bidding: True</code>, <code>winners: 4</code>.
+      </p>
+      <p><strong>Rules:</strong></p>
+      <ul class="spaced">
+        <li>Each person may hold <strong>one</strong> active bid at a time. You can only bid again after being <strong>outbid</strong> (you can't bid against yourself).</li>
+        <li>While winner slots are still open, the minimum bid is the <strong>starting bid</strong> — up to N people can sit at the same amount.</li>
+        <li>Once all N slots are full, the minimum becomes <strong>(lowest winning bid) + increment</strong>. A qualifying bid displaces the <strong>most recent</strong> bidder at the lowest amount (LIFO), who gets pinged and can bid again.</li>
+        <li>Any amount at or above the minimum is allowed (you can jump higher, not just step by the increment).</li>
+        <li>The <code>/bid</code> dropdown shows <code>Min Bid $X (f/N winners)</code>, and when the auction ends all N winners are announced and flagged in the CSV export.</li>
+      </ul>
+
+      <footer>
+        <strong>"Moderator"</strong> = anyone with the <strong>Manage Server</strong> permission, or the
+        role set in <code>MOD_ROLE_ID</code>.
+      </footer>
+    </div>
+  </body>
+</html>
