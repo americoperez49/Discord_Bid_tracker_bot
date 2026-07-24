@@ -34,7 +34,8 @@ db.exec(`
     group_mode          INTEGER NOT NULL DEFAULT 0,
     winners             INTEGER NOT NULL DEFAULT 1,
     warn_time           TEXT,
-    warned              INTEGER NOT NULL DEFAULT 0
+    warned              INTEGER NOT NULL DEFAULT 0,
+    warn_message_id     TEXT
   );
 
   CREATE TABLE IF NOT EXISTS bids (
@@ -70,6 +71,9 @@ ensureColumn('bids', 'displaced_bid_id', 'displaced_bid_id INTEGER');
 // Ending-soon reminder: when to post the warning, and whether it has been sent.
 ensureColumn('auctions', 'warn_time', 'warn_time TEXT');
 ensureColumn('auctions', 'warned', 'warned INTEGER NOT NULL DEFAULT 0');
+// Id of the posted reminder message, so it can be edited to a static "ended"
+// note once the auction closes (its live countdown would otherwise read "ago").
+ensureColumn('auctions', 'warn_message_id', 'warn_message_id TEXT');
 
 // Index on the (now-guaranteed) `active` column, after the migration above.
 db.exec(`CREATE INDEX IF NOT EXISTS idx_bids_active ON bids(auction_id, active);`);
@@ -144,6 +148,7 @@ const stmts = {
   // Set the ending-soon warning as sent, exactly once (guards against the timer
   // and the sweep both firing).
   markWarned: db.prepare(`UPDATE auctions SET warned = 1 WHERE id = ? AND warned = 0`),
+  setWarnMessageId: db.prepare(`UPDATE auctions SET warn_message_id = ? WHERE id = ?`),
   deactivateBid: db.prepare(`UPDATE bids SET active = 0 WHERE id = ?`),
   activateBid: db.prepare(`UPDATE bids SET active = 1 WHERE id = ?`),
   setDisplacedBidId: db.prepare(`UPDATE bids SET displaced_bid_id = ? WHERE id = ?`),
@@ -183,6 +188,10 @@ function createAuction(data) {
  */
 function markWarnedOnce(auctionId) {
   return stmts.markWarned.run(auctionId).changes > 0;
+}
+
+function setWarnMessageId(auctionId, messageId) {
+  stmts.setWarnMessageId.run(messageId, auctionId);
 }
 
 function setAuctionMessageId(auctionId, messageId) {
@@ -515,6 +524,7 @@ module.exports = {
   DB_PATH,
   createAuction,
   markWarnedOnce,
+  setWarnMessageId,
   setAuctionMessageId,
   getAuction,
   getActiveAuctionsForGuild,

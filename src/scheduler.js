@@ -2,7 +2,7 @@
 
 const db = require('./db');
 const { formatCents } = require('./util/money');
-const { formatDuration } = require('./util/time');
+const { discordRelativeTime, discordFullTime } = require('./util/time');
 const { buildAuctionEmbed, buildOutcomeEmbed } = require('./util/embeds');
 
 // Backstop sweep interval: catches auctions whose setTimeout was lost, whose
@@ -157,20 +157,15 @@ async function fireWarning(auctionId) {
       : `no bids yet · starts at **${formatCents(auction.starting_bid_cents)}**`;
   }
 
-  // Static time-left snapshot (rounded to the minute) instead of Discord's
-  // live relative timestamp, which would keep counting into "X ago" after close.
-  const remaining = new Date(auction.end_time).getTime() - now;
-  const leftText =
-    remaining >= 60000
-      ? `in about ${formatDuration(Math.round(remaining / 60000) * 60000)}`
-      : 'in less than a minute';
-
-  await channel.send({
+  // Live countdown while the auction is open; announceOutcome edits this message
+  // to a static "ended" note at close so it doesn't keep counting into "X ago".
+  const message = await channel.send({
     content:
-      `⏳ **Auction #${auction.id} — ${auction.item_name}** ends ${leftText} — ` +
+      `⏳ **Auction #${auction.id} — ${auction.item_name}** ends ${discordRelativeTime(auction.end_time)} — ` +
       `${detail}. Get your bids in!`,
     allowedMentions: { parse: [] }, // reminder only — no pings
   });
+  db.setWarnMessageId(auction.id, message.id);
 }
 
 /**
@@ -243,6 +238,19 @@ async function announceOutcome(auction, winners, status) {
     const msg = await channel.messages.fetch(auction.message_id).catch(() => null);
     if (msg) {
       await msg.edit({ embeds: [buildAuctionEmbed(auction)] }).catch(() => {});
+    }
+  }
+
+  // Turn the ending-soon reminder (if it was posted) into a static closed note
+  // so its live countdown stops reading "X ago".
+  if (auction.warn_message_id) {
+    const warnMsg = await channel.messages.fetch(auction.warn_message_id).catch(() => null);
+    if (warnMsg) {
+      const closed =
+        status === 'cancelled'
+          ? `❌ **Auction #${auction.id} — ${auction.item_name}** was cancelled.`
+          : `🏁 **Auction #${auction.id} — ${auction.item_name}** ended ${discordFullTime(new Date().toISOString())}.`;
+      await warnMsg.edit({ content: closed, allowedMentions: { parse: [] } }).catch(() => {});
     }
   }
 
