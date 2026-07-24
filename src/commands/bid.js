@@ -116,26 +116,59 @@ async function execute(interaction) {
 
   const auction = db.getAuction(auctionId);
   return auction.group_mode
-    ? finishGroupBid(interaction, auction, bidder, amountCents, rawMax, result)
+    ? finishGroupBid(interaction, auction, bidder, maxCents, result)
     : finishProxyBid(interaction, auction, bidder, maxCents, result);
 }
 
-/** Handle the reply/feed for a group-auction bid (max bids don't apply here). */
-async function finishGroupBid(interaction, auction, bidder, amountCents, rawMax, result) {
+/** Handle the reply/feed for a group-auction bid (with proxy/max support). */
+async function finishGroupBid(interaction, auction, bidder, maxCents, result) {
   const label = `#${auction.id} — ${auction.item_name}`;
-  const nextMin = db.nextMinBidCents(auction);
+  const { winnersCount: W, filled } = result;
 
-  let confirm =
-    `✅ Bid of **${formatCents(amountCents)}** placed on group auction **${label}**. ` +
-    `You're currently in a winning slot (${db.getFilledSlots(auction)}/${auction.winners} filled). ` +
-    `Next minimum bid is **${formatCents(nextMin)}**.`;
-  if (rawMax) confirm += `\n_(Max bids aren't used in group auctions — your bid stands as entered.)_`;
+  // Ephemeral confirmation.
+  let confirm;
+  if (result.selfRaise) {
+    confirm =
+      `✅ Max updated — you're still in a winning slot on **${label}** at ` +
+      `**${formatCents(result.bidderAmountCents)}**. I'll auto-bid up to your max.`;
+  } else if (result.bidderInSlot) {
+    confirm = `✅ You're in a winning slot on **${label}** at **${formatCents(result.bidderAmountCents)}** (${filled}/${W} filled).`;
+    if (maxCents && result.bidderAmountCents != null && maxCents > result.bidderAmountCents) {
+      confirm += ` I'll auto-bid up to your max.`;
+    }
+  } else {
+    const lowest = result.winners.length
+      ? result.winners[result.winners.length - 1].amount_cents
+      : null;
+    confirm =
+      `⚠️ You were outbid on **${label}** — you're not in a winning slot.` +
+      (lowest != null
+        ? ` The lowest winning bid is **${formatCents(lowest)}**. Bid higher (or raise your max) to get in.`
+        : '');
+  }
   await interaction.reply({ content: confirm, flags: MessageFlags.Ephemeral });
 
   await refreshAnnouncement(interaction, auction);
 
-  const outbid = result.kicked ?? null;
-  const embed = buildBidFeedEmbed(auction, bidder.username, amountCents, outbid);
+  // A raise of your own hidden max changes nothing publicly — no feed post.
+  if (result.selfRaise) return;
+
+  const outIds = result.newlyOut.map((o) => o.user_id);
+
+  if (result.autoHappened) {
+    // One quiet summary line; every intermediate step is already in the DB.
+    const amounts = result.winners.map((w) => formatCents(w.amount_cents)).join(', ');
+    let content = `${FEED_SPACER}🤖 Auto-bids resolved on **${label}** — winning bids: ${amounts} (${filled}/${W} filled).`;
+    if (outIds.length) {
+      content += `\n${outIds.map((id) => `<@${id}>`).join(' ')} — you've been outbid; bid again to reclaim a slot.`;
+    }
+    await interaction.channel?.send({ content, allowedMentions: { users: outIds } }).catch(() => {});
+    return;
+  }
+
+  // No proxy war — a plain entry/displacement. Use the readable bid card.
+  const outbid = result.newlyOut[0] ?? null;
+  const embed = buildBidFeedEmbed(auction, bidder.username, result.bidderAmountCents, outbid);
   const content = outbid
     ? `${FEED_SPACER}\n⚠️ <@${outbid.user_id}> — you've been outbid, bid again to reclaim your spot!`
     : FEED_SPACER;

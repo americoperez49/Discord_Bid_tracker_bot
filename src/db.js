@@ -169,6 +169,7 @@ const stmts = {
   setWarnMessageId: db.prepare(`UPDATE auctions SET warn_message_id = ? WHERE id = ?`),
   deactivateBid: db.prepare(`UPDATE bids SET active = 0 WHERE id = ?`),
   activateBid: db.prepare(`UPDATE bids SET active = 1 WHERE id = ?`),
+  deleteProxy: db.prepare(`DELETE FROM proxies WHERE auction_id = ? AND user_id = ?`),
   setDisplacedBidId: db.prepare(`UPDATE bids SET displaced_bid_id = ? WHERE id = ?`),
   getBid: db.prepare(`SELECT * FROM bids WHERE id = ?`),
   deleteBid: db.prepare(`DELETE FROM bids WHERE id = ?`),
@@ -399,63 +400,133 @@ function proxyBid(auction, bidder, amountCents, maxCents, nowIso) {
   };
 }
 
+// Safety net for the auto-bid resolution loop (it is already finite — the price
+// rises by >= one increment each step and is bounded by the highest max).
+const GROUP_RESOLVE_GUARD = 10000;
+
 /**
- * Group multi-winner bid.
- *  - A bidder may hold only one active (winning) bid at a time.
- *  - While fewer than `winners` slots are filled, the minimum is the starting
- *    bid (ties allowed).
- *  - Once full, the minimum is the lowest winning bid + increment; the new bid
- *    displaces the most-recently-placed bid at the lowest amount (LIFO), who is
- *    "outbid" and free to bid again.
+ * Group multi-winner bid with proxy (max) support.
+ *
+ *  - Every bidder has a hidden max (`maxCents`, at least their `amount`). A plain
+ *    bid has max = amount.
+ *  - A bidder holds at most one active (winning) slot. While already winning, a
+ *    /bid only raises their max (they can't out-bid themselves).
+ *  - A qualifying bid enters, displacing the lowest active bid (LIFO on ties).
+ *    If the displaced bidder's max can afford to reclaim (lowest-active + inc),
+ *    the bot auto-bids that minimum for them — which may displace someone else —
+ *    and the loop repeats until it settles. Pay-your-bid throughout.
+ *  - Every step (including each auto-bid) is persisted with a monotonic timestamp
+ *    and an `auto` flag, so the export shows the full blow-by-blow.
  */
-function groupBid(auction, bidder, amountCents, nowIso) {
-  const active = stmts.getActiveBidsAsc.all(auction.id); // lowest first
-  const mine = active.find((b) => b.user_id === bidder.id);
+function groupProxyBid(auction, bidder, amountCents, maxCents, nowIso) {
+  const inc = auction.min_increment_cents;
+  const W = auction.winners;
+  const myMax = Math.max(maxCents ?? amountCents, amountCents);
+
+  const baseMs = new Date(nowIso).getTime();
+  let step = 0;
+  const stamp = () => new Date(baseMs + step++).toISOString(); // monotonic ordering
+
+  const setProxy = (userId, username, max) => {
+    const existing = stmts.getProxy.get(auction.id, userId);
+    stmts.upsertProxy.run({
+      auction_id: auction.id,
+      user_id: userId,
+      username,
+      max_cents: max,
+      created_at: existing ? existing.created_at : nowIso,
+    });
+  };
+  const proxyMaxOf = (userId, fallback) => {
+    const p = stmts.getProxy.get(auction.id, userId);
+    return p ? p.max_cents : fallback;
+  };
+  const insert = (userId, username, cents, auto) =>
+    Number(
+      stmts.insertBid.run({
+        auction_id: auction.id,
+        user_id: userId,
+        username,
+        amount_cents: cents,
+        placed_at: stamp(),
+        active: 1,
+        auto: auto ? 1 : 0,
+      }).lastInsertRowid,
+    );
+
+  const activeStart = stmts.getActiveBidsAsc.all(auction.id); // lowest first
+  const beforeNames = new Map(activeStart.map((b) => [b.user_id, b.username]));
+
+  // Already holding a slot — allow raising the hidden max only.
+  const mine = activeStart.find((b) => b.user_id === bidder.id);
   if (mine) {
-    return { ok: false, reason: 'already_bidding', groupMode: true, currentCents: mine.amount_cents };
+    const existing = stmts.getProxy.get(auction.id, bidder.id);
+    const curMax = existing ? existing.max_cents : mine.amount_cents;
+    if (myMax <= curMax) {
+      return { ok: false, reason: 'already_bidding', groupMode: true, currentCents: mine.amount_cents };
+    }
+    setProxy(bidder.id, bidder.username, myMax);
+    return {
+      ok: true,
+      groupMode: true,
+      selfRaise: true,
+      bidderInSlot: true,
+      bidderAmountCents: mine.amount_cents,
+      winners: stmts.getActiveBidsDesc.all(auction.id),
+      newlyOut: [],
+      autoHappened: false,
+      filled: activeStart.length,
+      winnersCount: W,
+    };
   }
 
-  const full = active.length >= auction.winners;
-  const requiredCents = full
-    ? active[0].amount_cents + auction.min_increment_cents
-    : auction.starting_bid_cents;
-
+  const full = activeStart.length >= W;
+  const requiredCents = full ? activeStart[0].amount_cents + inc : auction.starting_bid_cents;
   if (amountCents < requiredCents) {
     return { ok: false, reason: 'too_low', requiredCents, groupMode: true };
   }
 
-  const info = stmts.insertBid.run({
-    auction_id: auction.id,
-    user_id: bidder.id,
-    username: bidder.username,
-    amount_cents: amountCents,
-    placed_at: nowIso,
-    active: 1,
-    auto: 0,
-  });
+  setProxy(bidder.id, bidder.username, myMax);
+  let lastInsertedId = insert(bidder.id, bidder.username, amountCents, false);
+  let autoHappened = false;
 
-  const bid = {
-    id: Number(info.lastInsertRowid),
-    auction_id: auction.id,
-    user_id: bidder.id,
-    username: bidder.username,
-    amount_cents: amountCents,
-    placed_at: nowIso,
-  };
-
-  // If we've exceeded capacity, displace the lowest winning bid (LIFO on ties).
-  // When the set was full, requiredCents > lowest, so the new bid is never the
-  // one displaced.
-  let kicked = null;
-  if (active.length + 1 > auction.winners) {
-    kicked = stmts.getLowestActiveToKick.get(auction.id);
+  // Resolve displacements, auto-bidding for anyone whose max can reclaim a slot.
+  let iter = 0;
+  while (stmts.getActiveBidsAsc.all(auction.id).length > W) {
+    if (++iter > GROUP_RESOLVE_GUARD) break;
+    const kicked = stmts.getLowestActiveToKick.get(auction.id);
     stmts.deactivateBid.run(kicked.id);
-    // Remember who this bid displaced so it can be restored if the bid is
-    // later removed by a moderator.
-    stmts.setDisplacedBidId.run(kicked.id, bid.id);
+    stmts.setDisplacedBidId.run(kicked.id, lastInsertedId); // last insert displaced `kicked`
+
+    const remaining = stmts.getActiveBidsAsc.all(auction.id);
+    const reclaimMin = remaining[0].amount_cents + inc;
+    if (proxyMaxOf(kicked.user_id, kicked.amount_cents) >= reclaimMin) {
+      lastInsertedId = insert(kicked.user_id, kicked.username, reclaimMin, true);
+      autoHappened = true;
+    }
+    // Otherwise the kicked bidder is out and the set is back to W — loop ends.
   }
 
-  return { ok: true, groupMode: true, bid, kicked, nextMinCents: nextMinBidCents(auction) };
+  const after = stmts.getActiveBidsDesc.all(auction.id);
+  const afterUsers = new Set(after.map((b) => b.user_id));
+  const bidderBid = after.find((b) => b.user_id === bidder.id) ?? null;
+
+  const newlyOut = [];
+  for (const [userId, username] of beforeNames) {
+    if (!afterUsers.has(userId) && userId !== bidder.id) newlyOut.push({ user_id: userId, username });
+  }
+
+  return {
+    ok: true,
+    groupMode: true,
+    bidderInSlot: afterUsers.has(bidder.id),
+    bidderAmountCents: bidderBid ? bidderBid.amount_cents : null,
+    winners: after,
+    newlyOut,
+    autoHappened,
+    filled: after.length,
+    winnersCount: W,
+  };
 }
 
 /**
@@ -476,9 +547,8 @@ const placeBidTxn = db.transaction((auctionId, bidder, amountCents, maxCents, no
     return { ok: false, reason: 'expired', endTime: auction.end_time };
   }
 
-  // max bids apply to normal auctions only; group auctions ignore maxCents.
   return auction.group_mode
-    ? groupBid(auction, bidder, amountCents, nowIso)
+    ? groupProxyBid(auction, bidder, amountCents, maxCents, nowIso)
     : proxyBid(auction, bidder, amountCents, maxCents, nowIso);
 });
 
@@ -596,6 +666,8 @@ const removeBidTxn = db.transaction((bidId) => {
   if (restored) stmts.activateBid.run(restored.id);
 
   stmts.deleteBid.run(bidId);
+  // Clear the removed bidder's proxy so it can't silently auto-bid them back in.
+  stmts.deleteProxy.run(removed.auction_id, removed.user_id);
   return { auction, removed, restored };
 });
 
@@ -614,6 +686,8 @@ const editBidAmountTxn = db.transaction((bidId, newAmountCents) => {
   const before = stmts.getBid.get(bidId);
   if (!before) return null;
   stmts.updateBidAmount.run(newAmountCents, bidId);
+  // Clear the bidder's proxy so the corrected amount stands (no auto re-bid).
+  stmts.deleteProxy.run(before.auction_id, before.user_id);
   return {
     auction: stmts.getAuction.get(before.auction_id),
     bid: stmts.getBid.get(bidId),

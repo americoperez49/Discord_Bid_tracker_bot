@@ -39,7 +39,11 @@ bids the minimum needed to keep you in the lead, only going as high as your max:
 - If a bid exceeds your max, you're genuinely outbid and pinged. Your max is never shown
   publicly. To raise your ceiling, `/bid` again with a higher `max_bid`.
 
-Max bids apply to **normal auctions only** — group auctions ignore `max_bid`.
+Max bids work in **group auctions** too: if you're displaced from a winning slot, the bot
+auto-bids the minimum needed to reclaim one, up to your max — a whole displacement war resolves
+instantly and is posted as a single `🤖 Auto-bids resolved …` summary (only knocked-out bidders
+are pinged). Every step is still recorded individually in the CSV export (flagged `auto_bid`,
+with who each bid displaced), so you get the full blow-by-blow history.
 
 ## Group (multi-winner) bidding
 
