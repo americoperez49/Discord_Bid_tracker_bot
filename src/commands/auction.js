@@ -37,6 +37,19 @@ const data = new SlashCommandBuilder()
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
   .addSubcommand((sub) =>
     sub
+      .setName('cancel')
+      .setDescription('Cancel an auction with no winner (moderator only).')
+      .addIntegerOption((o) =>
+        o.setName('item').setDescription('The auction (required)').setRequired(true).setAutocomplete(true),
+      ),
+  )
+  .addSubcommand((sub) =>
+    sub
+      .setName('cleanup')
+      .setDescription('Delete all ended/cancelled auctions in this server (moderator only).'),
+  )
+  .addSubcommand((sub) =>
+    sub
       .setName('create')
       .setDescription('List a new item for auction (moderator only).')
       .addStringOption((o) =>
@@ -83,62 +96,11 @@ const data = new SlashCommandBuilder()
       ),
   )
   .addSubcommand((sub) =>
-    sub.setName('list').setDescription('Show all active auctions in this server.'),
-  )
-  .addSubcommand((sub) =>
-    sub
-      .setName('info')
-      .setDescription('Show details and recent bids for an auction.')
-      .addIntegerOption((o) =>
-        o.setName('item').setDescription('The auction (required)').setRequired(true).setAutocomplete(true),
-      ),
-  )
-  .addSubcommand((sub) =>
-    sub
-      .setName('end')
-      .setDescription('End an auction early (moderator only).')
-      .addIntegerOption((o) =>
-        o.setName('item').setDescription('The auction (required)').setRequired(true).setAutocomplete(true),
-      ),
-  )
-  .addSubcommand((sub) =>
-    sub
-      .setName('cancel')
-      .setDescription('Cancel an auction with no winner (moderator only).')
-      .addIntegerOption((o) =>
-        o.setName('item').setDescription('The auction (required)').setRequired(true).setAutocomplete(true),
-      ),
-  )
-  .addSubcommand((sub) =>
     sub
       .setName('delete')
       .setDescription('Permanently delete an auction and its bids (moderator only).')
       .addIntegerOption((o) =>
         o.setName('item').setDescription('The auction (required)').setRequired(true).setAutocomplete(true),
-      ),
-  )
-  .addSubcommand((sub) =>
-    sub
-      .setName('cleanup')
-      .setDescription('Delete all ended/cancelled auctions in this server (moderator only).'),
-  )
-  .addSubcommand((sub) =>
-    sub
-      .setName('removebid')
-      .setDescription('Remove a specific bidder\'s bid from an auction (moderator only).')
-      .addIntegerOption((o) =>
-        o
-          .setName('item')
-          .setDescription('The auction (required)')
-          .setRequired(true)
-          .setAutocomplete(true),
-      )
-      .addIntegerOption((o) =>
-        o
-          .setName('bidder')
-          .setDescription('The bidder whose bid to remove (required)')
-          .setRequired(true)
-          .setAutocomplete(true),
       ),
   )
   .addSubcommand((sub) =>
@@ -168,12 +130,50 @@ const data = new SlashCommandBuilder()
   )
   .addSubcommand((sub) =>
     sub
+      .setName('end')
+      .setDescription('End an auction early (moderator only).')
+      .addIntegerOption((o) =>
+        o.setName('item').setDescription('The auction (required)').setRequired(true).setAutocomplete(true),
+      ),
+  )
+  .addSubcommand((sub) =>
+    sub
       .setName('export')
       .setDescription('Download the bid list as a CSV (moderator only).')
       .addIntegerOption((o) =>
         o
           .setName('item')
           .setDescription('The auction; leave empty to export all auctions in this server (optional)')
+          .setAutocomplete(true),
+      ),
+  )
+  .addSubcommand((sub) =>
+    sub
+      .setName('info')
+      .setDescription('Show details and recent bids for an auction.')
+      .addIntegerOption((o) =>
+        o.setName('item').setDescription('The auction (required)').setRequired(true).setAutocomplete(true),
+      ),
+  )
+  .addSubcommand((sub) =>
+    sub.setName('list').setDescription('Show all active auctions in this server.'),
+  )
+  .addSubcommand((sub) =>
+    sub
+      .setName('removebid')
+      .setDescription('Remove a specific bidder\'s bid from an auction (moderator only).')
+      .addIntegerOption((o) =>
+        o
+          .setName('item')
+          .setDescription('The auction (required)')
+          .setRequired(true)
+          .setAutocomplete(true),
+      )
+      .addIntegerOption((o) =>
+        o
+          .setName('bidder')
+          .setDescription('The bidder whose bid to remove (required)')
+          .setRequired(true)
           .setAutocomplete(true),
       ),
   );
