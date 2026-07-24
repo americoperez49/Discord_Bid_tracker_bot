@@ -80,10 +80,12 @@ function centsToInputValue(cents) {
 }
 
 /**
- * Suggest a single bid amount for the `amount` option: the next minimum bid,
- * so the user can fill the field in one tap. Since the suggestion depends on
- * which auction is chosen, this reads the already-selected `item` option; if
- * none is chosen yet it offers no suggestion (the user can still type freely).
+ * Suggest a single bid amount for the `amount` option, one tap to fill:
+ *  - If the user is already the current high bidder (or a current winner in a
+ *    group auction), suggest their *current bid* — so they can keep it and just
+ *    raise their `max_bid` rather than out-bid themselves.
+ *  - Otherwise, suggest the next minimum bid.
+ * Reads the already-selected `item`; offers nothing if none is chosen yet.
  *
  * @param {import('discord.js').AutocompleteInteraction} interaction
  */
@@ -93,6 +95,23 @@ async function respondWithBidAmounts(interaction) {
 
   if (!auction || auction.status !== 'active' || auction.guild_id !== interaction.guildId) {
     await interaction.respond([]);
+    return;
+  }
+
+  const userId = interaction.user.id;
+  let myCurrentCents = null;
+  if (auction.group_mode) {
+    const mine = db.getActiveBids(auctionId).find((b) => b.user_id === userId);
+    if (mine) myCurrentCents = mine.amount_cents;
+  } else {
+    const high = db.getHighestBid(auctionId);
+    if (high && high.user_id === userId) myCurrentCents = high.amount_cents;
+  }
+
+  if (myCurrentCents != null) {
+    await interaction.respond([
+      { name: `${formatCents(myCurrentCents)} — your current bid`, value: centsToInputValue(myCurrentCents) },
+    ]);
     return;
   }
 
