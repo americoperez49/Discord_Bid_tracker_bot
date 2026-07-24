@@ -2,7 +2,7 @@
 
 const db = require('./db');
 const { formatCents } = require('./util/money');
-const { discordRelativeTime } = require('./util/time');
+const { formatDuration } = require('./util/time');
 const { buildAuctionEmbed, buildOutcomeEmbed } = require('./util/embeds');
 
 // Backstop sweep interval: catches auctions whose setTimeout was lost, whose
@@ -157,9 +157,17 @@ async function fireWarning(auctionId) {
       : `no bids yet · starts at **${formatCents(auction.starting_bid_cents)}**`;
   }
 
+  // Static time-left snapshot (rounded to the minute) instead of Discord's
+  // live relative timestamp, which would keep counting into "X ago" after close.
+  const remaining = new Date(auction.end_time).getTime() - now;
+  const leftText =
+    remaining >= 60000
+      ? `in about ${formatDuration(Math.round(remaining / 60000) * 60000)}`
+      : 'in less than a minute';
+
   await channel.send({
     content:
-      `⏳ **Auction #${auction.id} — ${auction.item_name}** ends ${discordRelativeTime(auction.end_time)} — ` +
+      `⏳ **Auction #${auction.id} — ${auction.item_name}** ends ${leftText} — ` +
       `${detail}. Get your bids in!`,
     allowedMentions: { parse: [] }, // reminder only — no pings
   });

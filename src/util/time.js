@@ -69,9 +69,39 @@ function discordFullTime(isoString) {
 
 /**
  * Discord relative markup, e.g. "<t:1699999999:R>" -> "in 3 hours".
+ * Note: this self-updates in the client, so it will read "X ago" once the time
+ * passes — use {@link formatDuration} for a fixed snapshot that won't count.
  */
 function discordRelativeTime(isoString) {
   return `<t:${unixSeconds(isoString)}:R>`;
+}
+
+/**
+ * Format a millisecond span as a short, static human string, e.g.
+ * "1 hour", "1 hour 30 minutes", "2 minutes", "45 seconds". Uses at most the
+ * two largest non-zero units. Returns "moments" for spans under a second.
+ * @param {number} ms
+ * @returns {string}
+ */
+function formatDuration(ms) {
+  if (ms < 1000) return 'moments';
+  const units = [
+    ['day', 86400000],
+    ['hour', 3600000],
+    ['minute', 60000],
+    ['second', 1000],
+  ];
+  const parts = [];
+  let rem = ms;
+  for (const [name, size] of units) {
+    const n = Math.floor(rem / size);
+    if (n > 0) {
+      parts.push(`${n} ${name}${n === 1 ? '' : 's'}`);
+      rem -= n * size;
+    }
+    if (parts.length === 2) break;
+  }
+  return parts.join(' ') || 'moments';
 }
 
 module.exports = {
@@ -80,4 +110,5 @@ module.exports = {
   unixSeconds,
   discordFullTime,
   discordRelativeTime,
+  formatDuration,
 };
