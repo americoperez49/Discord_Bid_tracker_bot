@@ -32,7 +32,9 @@ db.exec(`
     winner_user_id      TEXT,
     winning_amount_cents INTEGER,
     group_mode          INTEGER NOT NULL DEFAULT 0,
-    winners             INTEGER NOT NULL DEFAULT 1
+    winners             INTEGER NOT NULL DEFAULT 1,
+    warn_time           TEXT,
+    warned              INTEGER NOT NULL DEFAULT 0
   );
 
   CREATE TABLE IF NOT EXISTS bids (
@@ -65,6 +67,9 @@ ensureColumn('bids', 'active', 'active INTEGER NOT NULL DEFAULT 1');
 // Records which bid a group bid displaced (LIFO), so a moderator removing that
 // bid can restore the bidder it knocked out of a winning slot.
 ensureColumn('bids', 'displaced_bid_id', 'displaced_bid_id INTEGER');
+// Ending-soon reminder: when to post the warning, and whether it has been sent.
+ensureColumn('auctions', 'warn_time', 'warn_time TEXT');
+ensureColumn('auctions', 'warned', 'warned INTEGER NOT NULL DEFAULT 0');
 
 // Index on the (now-guaranteed) `active` column, after the migration above.
 db.exec(`CREATE INDEX IF NOT EXISTS idx_bids_active ON bids(auction_id, active);`);
@@ -75,11 +80,11 @@ const stmts = {
     INSERT INTO auctions
       (guild_id, channel_id, message_id, item_name, description,
        starting_bid_cents, min_increment_cents, created_by, created_at, end_time, status,
-       group_mode, winners)
+       group_mode, winners, warn_time)
     VALUES
       (@guild_id, @channel_id, @message_id, @item_name, @description,
        @starting_bid_cents, @min_increment_cents, @created_by, @created_at, @end_time, 'active',
-       @group_mode, @winners)
+       @group_mode, @winners, @warn_time)
   `),
   setMessageId: db.prepare(`UPDATE auctions SET message_id = ? WHERE id = ?`),
   getAuction: db.prepare(`SELECT * FROM auctions WHERE id = ?`),
@@ -136,6 +141,9 @@ const stmts = {
     SELECT * FROM bids WHERE auction_id = ? AND active = 1
      ORDER BY amount_cents ASC, placed_at DESC LIMIT 1
   `),
+  // Set the ending-soon warning as sent, exactly once (guards against the timer
+  // and the sweep both firing).
+  markWarned: db.prepare(`UPDATE auctions SET warned = 1 WHERE id = ? AND warned = 0`),
   deactivateBid: db.prepare(`UPDATE bids SET active = 0 WHERE id = ?`),
   activateBid: db.prepare(`UPDATE bids SET active = 1 WHERE id = ?`),
   setDisplacedBidId: db.prepare(`UPDATE bids SET displaced_bid_id = ? WHERE id = ?`),
@@ -160,9 +168,21 @@ function createAuction(data) {
   const info = stmts.insertAuction.run({
     group_mode: 0,
     winners: 1,
+    warn_time: null,
     ...data,
   });
   return stmts.getAuction.get(info.lastInsertRowid);
+}
+
+/**
+ * Mark an auction's ending-soon warning as sent — but only if it hasn't been
+ * already. Returns true if this call is the one that flipped it (so the caller
+ * should post the warning), false if it was already warned.
+ * @param {number} auctionId
+ * @returns {boolean}
+ */
+function markWarnedOnce(auctionId) {
+  return stmts.markWarned.run(auctionId).changes > 0;
 }
 
 function setAuctionMessageId(auctionId, messageId) {
@@ -494,6 +514,7 @@ module.exports = {
   db,
   DB_PATH,
   createAuction,
+  markWarnedOnce,
   setAuctionMessageId,
   getAuction,
   getActiveAuctionsForGuild,

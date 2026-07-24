@@ -13,7 +13,7 @@ autocomplete dropdown of the currently-active items.
 
 | Command | Who | What it does |
 | --- | --- | --- |
-| `/auction create item: starting_bid: duration: [description] [increment] [quantity] [group_bidding] [winners]` | Moderator | List an item. `duration` looks like `2d12h`, `48h`, `90m`, `1w`. `increment` overrides the default $5 minimum raise. `quantity` (1–25, default 1) lists that many identical copies as separate auctions; when >1, each copy's name is suffixed `(1 of N)`, `(2 of N)`, … `group_bidding`/`winners` enable a single shared multi-winner auction — see below. |
+| `/auction create item: starting_bid: duration: [description] [increment] [quantity] [group_bidding] [winners]` | Moderator | List an item. `duration` looks like `2d12h`, `48h`, `90m`, `1w`. `increment` overrides the default $5 minimum raise. `quantity` (1–25, default 1) lists that many identical copies as separate auctions; when >1, each copy's name is suffixed `(1 of N)`, `(2 of N)`, … `group_bidding`/`winners` enable a single shared multi-winner auction — see below. `warn_before` (default `1h`) posts a no-ping "ending soon" reminder that long before the auction closes; skipped automatically if the auction is shorter than the lead time. |
 | `/bid item: amount:` | Anyone | Bid on an active auction. `item` autocompletes to active auctions; `amount` is dollars (`50`, `49.99`). |
 | `/auction list` | Anyone | List active auctions with current high bid and time left. |
 | `/auction info item:` | Anyone | Show one auction's details and recent bids. |

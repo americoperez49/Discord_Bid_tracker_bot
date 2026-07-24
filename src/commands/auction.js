@@ -29,6 +29,7 @@ const {
 const { scheduleAuctionEnd, endAuction, cancelScheduled } = require('../scheduler');
 
 const DEFAULT_INCREMENT_CENTS = 500; // $5
+const DEFAULT_WARN_BEFORE_MS = 60 * 60 * 1000; // 1 hour
 
 const data = new SlashCommandBuilder()
   .setName('auction')
@@ -93,6 +94,11 @@ const data = new SlashCommandBuilder()
           .setDescription('Group bidding only: number of winning slots / items, 2–25 (optional)')
           .setMinValue(2)
           .setMaxValue(25),
+      )
+      .addStringOption((o) =>
+        o
+          .setName('warn_before')
+          .setDescription('Post an ending-soon reminder this long before the end, e.g. 1h, 30m (default 1h) (optional)'),
       ),
   )
   .addSubcommand((sub) =>
@@ -237,6 +243,7 @@ async function handleCreate(interaction) {
   const quantity = interaction.options.getInteger('quantity') ?? 1;
   const groupMode = interaction.options.getBoolean('group_bidding') ?? false;
   const winners = interaction.options.getInteger('winners');
+  const warnInput = interaction.options.getString('warn_before');
 
   if (startingBidCents === null || startingBidCents <= 0) {
     return interaction.reply({
@@ -273,12 +280,29 @@ async function handleCreate(interaction) {
     });
   }
 
+  let warnBeforeMs = DEFAULT_WARN_BEFORE_MS;
+  if (warnInput) {
+    const parsed = parseDurationMs(warnInput);
+    if (parsed === null) {
+      return interaction.reply({
+        content: '⚠️ `warn_before` is invalid. Use forms like `1h`, `30m`, `2h`, or `1d`.',
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+    warnBeforeMs = parsed;
+  }
+
   // Posting several announcement messages can take longer than Discord's 3s
   // reply window, so acknowledge first and edit the reply when done.
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   const nowIso = new Date().toISOString();
   const endTime = endTimeFromDuration(durationInput);
+
+  // Ending-soon reminder time. Skip it if it would land in the past (auction is
+  // shorter than the requested lead time).
+  const warnMs = new Date(endTime).getTime() - warnBeforeMs;
+  const warnTime = warnMs > Date.now() ? new Date(warnMs).toISOString() : null;
 
   const base = {
     guild_id: interaction.guildId,
@@ -290,7 +314,11 @@ async function handleCreate(interaction) {
     created_by: interaction.user.id,
     created_at: nowIso,
     end_time: endTime,
+    warn_time: warnTime,
   };
+  const warnNote = warnTime
+    ? ` A reminder will post ${discordRelativeTime(warnTime)}.`
+    : ` _(No ending-soon reminder — the auction is shorter than the reminder lead time.)_`;
 
   // Group bidding: one shared auction with N winner slots (quantity is ignored).
   if (groupMode) {
@@ -302,7 +330,7 @@ async function handleCreate(interaction) {
 
     let content =
       `✅ Group auction **#${auction.id} — ${baseName}** created with **${winners} winner slots**. ` +
-      `Starting bid ${formatCents(startingBidCents)}, ends ${discordRelativeTime(endTime)}.`;
+      `Starting bid ${formatCents(startingBidCents)}, ends ${discordRelativeTime(endTime)}.${warnNote}`;
     if (quantity > 1) content += `\n_(quantity is ignored in group mode — winners controls the slots.)_`;
     await interaction.editReply({ content });
     return;
@@ -329,9 +357,9 @@ async function handleCreate(interaction) {
   const content =
     quantity > 1
       ? `✅ Created **${quantity}** auctions for **${baseName}** (${idList}). ` +
-        `Starting bid ${formatCents(startingBidCents)} each, all end ${discordRelativeTime(endTime)}.`
+        `Starting bid ${formatCents(startingBidCents)} each, all end ${discordRelativeTime(endTime)}.${warnNote}`
       : `✅ Auction **${idList} — ${baseName}** created. ` +
-        `Starting bid ${formatCents(startingBidCents)}, ends ${discordRelativeTime(endTime)}.`;
+        `Starting bid ${formatCents(startingBidCents)}, ends ${discordRelativeTime(endTime)}.${warnNote}`;
 
   await interaction.editReply({ content });
 }

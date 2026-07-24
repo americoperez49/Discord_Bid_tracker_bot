@@ -1,6 +1,8 @@
 'use strict';
 
 const db = require('./db');
+const { formatCents } = require('./util/money');
+const { discordRelativeTime } = require('./util/time');
 const { buildAuctionEmbed, buildOutcomeEmbed } = require('./util/embeds');
 
 // Backstop sweep interval: catches auctions whose setTimeout was lost, whose
@@ -16,6 +18,8 @@ const LEADING_SPACER = '​\n';
 
 /** @type {Map<number, NodeJS.Timeout>} auctionId -> pending end timer */
 const timers = new Map();
+/** @type {Map<number, NodeJS.Timeout>} auctionId -> pending "ending soon" timer */
+const warnTimers = new Map();
 
 let clientRef = null;
 
@@ -79,6 +83,30 @@ function scheduleAuctionEnd(auction) {
   }, Math.min(delay, MAX_TIMEOUT_MS));
 
   timers.set(auction.id, timer);
+  scheduleWarning(auction);
+}
+
+/**
+ * Schedule the "ending soon" reminder for an auction, if one is set and not yet
+ * sent. A warn time already in the past is left to the sweep (which fires it if
+ * still due), so a reminder is never missed after downtime.
+ * @param {object} auction
+ */
+function scheduleWarning(auction) {
+  clearWarnTimer(auction.id);
+  if (!auction.warn_time || auction.warned) return;
+
+  const delay = new Date(auction.warn_time).getTime() - Date.now();
+  if (delay <= 0) return;
+
+  const timer = setTimeout(() => {
+    warnTimers.delete(auction.id);
+    fireWarning(auction.id).catch((err) =>
+      console.error(`Failed to post ending-soon warning for auction #${auction.id}:`, err),
+    );
+  }, Math.min(delay, MAX_TIMEOUT_MS));
+
+  warnTimers.set(auction.id, timer);
 }
 
 function clearAuctionTimer(auctionId) {
@@ -89,13 +117,77 @@ function clearAuctionTimer(auctionId) {
   }
 }
 
-/** Periodic backstop: end any active auction whose time has passed. */
+function clearWarnTimer(auctionId) {
+  const timer = warnTimers.get(auctionId);
+  if (timer) {
+    clearTimeout(timer);
+    warnTimers.delete(auctionId);
+  }
+}
+
+/**
+ * Post the no-ping "ending soon" reminder for an auction, exactly once. Skips if
+ * the auction is no longer active, not yet due, already over, or already warned.
+ * @param {number} auctionId
+ */
+async function fireWarning(auctionId) {
+  const auction = db.getAuction(auctionId);
+  if (!auction || auction.status !== 'active' || auction.warned || !auction.warn_time) return;
+
+  const now = Date.now();
+  if (new Date(auction.warn_time).getTime() > now) return; // not due yet
+  if (new Date(auction.end_time).getTime() <= now) {
+    db.markWarnedOnce(auctionId); // auction already over — nothing to warn about
+    return;
+  }
+  if (!db.markWarnedOnce(auctionId)) return; // another path already warned
+  if (!clientRef) return;
+
+  const channel = await clientRef.channels.fetch(auction.channel_id).catch(() => null);
+  if (!channel || !channel.isTextBased()) return;
+
+  const nextMin = db.nextMinBidCents(auction);
+  let detail;
+  if (auction.group_mode) {
+    detail = `${db.getFilledSlots(auction)}/${auction.winners} winning slots filled · minimum bid **${formatCents(nextMin)}**`;
+  } else {
+    const high = db.getHighestBid(auction.id);
+    detail = high
+      ? `current high bid **${formatCents(high.amount_cents)}** · next minimum **${formatCents(nextMin)}**`
+      : `no bids yet · starts at **${formatCents(auction.starting_bid_cents)}**`;
+  }
+
+  await channel.send({
+    content:
+      `⏳ **Auction #${auction.id} — ${auction.item_name}** ends ${discordRelativeTime(auction.end_time)} — ` +
+      `${detail}. Get your bids in!`,
+    allowedMentions: { parse: [] }, // reminder only — no pings
+  });
+}
+
+/**
+ * Periodic backstop: end any active auction whose time has passed, and post any
+ * due "ending soon" reminders (covers lost timers, long delays, and downtime).
+ */
 function runSweep() {
   const now = Date.now();
   for (const auction of db.getAllActiveAuctions()) {
-    if (new Date(auction.end_time).getTime() <= now && !timers.has(auction.id)) {
+    const endMs = new Date(auction.end_time).getTime();
+    if (endMs <= now && !timers.has(auction.id)) {
       endAuction(auction.id, 'ended').catch((err) =>
         console.error(`Sweep failed to end auction #${auction.id}:`, err),
+      );
+      continue;
+    }
+    if (
+      auction.warn_time &&
+      !auction.warned &&
+      !warnTimers.has(auction.id) &&
+      new Date(auction.warn_time).getTime() <= now &&
+      endMs > now
+    ) {
+      fireWarning(auction.id).catch((err) =>
+        console.error(`Sweep failed to warn for auction #${auction.id}:`, err),
       );
     }
   }
@@ -110,6 +202,7 @@ function runSweep() {
  */
 async function endAuction(auctionId, status = 'ended') {
   clearAuctionTimer(auctionId);
+  clearWarnTimer(auctionId);
 
   const result = db.finalizeAuction(auctionId, status);
   if (!result) return null; // already ended/cancelled elsewhere
@@ -178,6 +271,7 @@ async function announceOutcome(auction, winners, status) {
  */
 function cancelScheduled(auctionId) {
   clearAuctionTimer(auctionId);
+  clearWarnTimer(auctionId);
 }
 
 module.exports = { initScheduler, scheduleAuctionEnd, endAuction, cancelScheduled };
