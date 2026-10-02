@@ -89,6 +89,8 @@ ensureColumn('bids', 'auto', 'auto INTEGER NOT NULL DEFAULT 0');
 
 // Index on the (now-guaranteed) `active` column, after the migration above.
 db.exec(`CREATE INDEX IF NOT EXISTS idx_bids_active ON bids(auction_id, active);`);
+// Per-user lookups (the HTTP API's /users/:userId routes).
+db.exec(`CREATE INDEX IF NOT EXISTS idx_bids_user ON bids(user_id, auction_id);`);
 
 // --- Prepared statements ---
 const stmts = {
@@ -174,6 +176,32 @@ const stmts = {
   getBid: db.prepare(`SELECT * FROM bids WHERE id = ?`),
   deleteBid: db.prepare(`DELETE FROM bids WHERE id = ?`),
   updateBidAmount: db.prepare(`UPDATE bids SET amount_cents = ? WHERE id = ?`),
+  // --- Per-user queries, scoped to one guild ---
+  getUserBidsInGuild: db.prepare(`
+    SELECT b.*, a.item_name, a.status AS auction_status, a.group_mode
+      FROM bids b JOIN auctions a ON a.id = b.auction_id
+     WHERE a.guild_id = ? AND b.user_id = ?
+     ORDER BY b.placed_at DESC, b.id DESC
+  `),
+  getUserActiveAuctionsInGuild: db.prepare(`
+    SELECT a.*, MAX(b.amount_cents) AS user_high_cents
+      FROM auctions a JOIN bids b ON b.auction_id = a.id
+     WHERE a.guild_id = ? AND b.user_id = ? AND a.status = 'active'
+     GROUP BY a.id
+     ORDER BY a.end_time ASC
+  `),
+  // Ended auctions the user won: the recorded winner of a normal auction, or a
+  // bid still holding a winning slot at close in a group auction.
+  getUserWinsInGuild: db.prepare(`
+    SELECT a.*, MAX(b.amount_cents) AS won_cents
+      FROM auctions a JOIN bids b ON b.auction_id = a.id
+     WHERE a.guild_id = ? AND b.user_id = ? AND a.status = 'ended'
+       AND ((a.group_mode = 1 AND b.active = 1)
+         OR (a.group_mode = 0 AND a.winner_user_id = b.user_id
+             AND a.winning_amount_cents = b.amount_cents))
+     GROUP BY a.id
+     ORDER BY a.end_time DESC
+  `),
   // Each bidder's most recent bid on an auction (one row per user), for the
   // moderator bidder picker.
   getLatestBidsPerUser: db.prepare(`
@@ -621,6 +649,31 @@ function getBid(bidId) {
   return stmts.getBid.get(bidId);
 }
 
+/** Every bid a user has placed in a guild, newest first, with its auction's name and status. */
+function getUserBidsInGuild(guildId, userId) {
+  return stmts.getUserBidsInGuild.all(guildId, userId);
+}
+
+/** Active auctions in a guild the user has bid on, with their highest bid as `user_high_cents`. */
+function getUserActiveAuctionsInGuild(guildId, userId) {
+  return stmts.getUserActiveAuctionsInGuild.all(guildId, userId);
+}
+
+/** Ended auctions in a guild the user won, with the winning amount as `won_cents`. */
+function getUserWinsInGuild(guildId, userId) {
+  return stmts.getUserWinsInGuild.all(guildId, userId);
+}
+
+/** A user's hidden max (proxy) on an auction, or undefined. Never expose another user's. */
+function getProxy(auctionId, userId) {
+  return stmts.getProxy.get(auctionId, userId);
+}
+
+/** Group-mode: the user's bid currently holding a winning slot, or undefined. */
+function getActiveBidForUser(auctionId, userId) {
+  return stmts.getActiveBidForUser.get(auctionId, userId);
+}
+
 /** Each bidder's most recent bid on an auction — one row per user. */
 function getLatestBidsPerUser(auctionId) {
   return stmts.getLatestBidsPerUser.all(auctionId);
@@ -724,6 +777,11 @@ module.exports = {
   deleteFinishedAuctionsForGuild,
   getBid,
   getLatestBidsPerUser,
+  getUserBidsInGuild,
+  getUserActiveAuctionsInGuild,
+  getUserWinsInGuild,
+  getProxy,
+  getActiveBidForUser,
   reinstatementFor,
   removeBid,
   editBidAmount,

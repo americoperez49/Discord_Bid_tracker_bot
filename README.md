@@ -149,6 +149,91 @@ the connection and can miss closing times — avoid them.
 The bot also runs unchanged on your own PC with `npm start` (auctions only progress while it
 is on).
 
+## HTTP API (for Rogue App)
+
+The bot can serve a small JSON API so another application ("Rogue App") can run the same
+moderator actions and look up a user's own bids. It runs inside the bot process and is **off**
+unless `API_ENABLED=true` (see `.env.example` for every setting).
+
+### Authentication
+
+Every request (except `/v1/health`) needs **both** headers:
+
+| Header | Proves |
+| --- | --- |
+| `X-Api-Key: <API_KEY>` | the request comes from Rogue App's server |
+| `Authorization: Bearer <token>` | the signed-in user. The token is the user's Discord OAuth2 access token from Rogue App's "Sign in with Discord" (scope `identify`). |
+
+The bot checks the token with Discord (`GET /oauth2/@me`) and rejects it unless it's valid,
+was issued to `ROGUE_APP_CLIENT_ID`, and has the `identify` scope. Results are cached for up
+to 60 seconds, keyed by a hash of the token. The user Discord reports is the one acting.
+
+- **Moderator routes** require that user to be a moderator of the server, using the same rule
+  as the slash commands (Manage Server, or `MOD_ROLE_ID`), checked fresh from Discord.
+- **User routes**: a user can see their own data, including their hidden max bids. A
+  moderator can see anyone's data in their server, but never another user's max bids.
+
+Keep the API on `127.0.0.1` unless Rogue App runs on another machine. In that case, put it
+behind HTTPS (e.g. a reverse proxy), because every request carries a user's token.
+
+### Conventions
+
+- Everything is under `/v1`. Request and response bodies are JSON.
+- Money is **integer cents**, and times are ISO 8601 UTC.
+- Durations use the slash-command format: `"2d12h"`, `"90m"`.
+- Errors look like `{ "error": { "code": "not_moderator", "message": "…" } }`:
+
+| Status | Codes |
+| --- | --- |
+| 400 | `invalid_input`, `invalid_json`, `unknown_field`, `channel_unavailable` |
+| 401 | `invalid_api_key`, `missing_token`, `token_invalid` (refresh the token and retry), `wrong_application`, `missing_identify_scope` |
+| 403 | `not_moderator`, `not_member`, `forbidden` |
+| 404 | `not_found`, `guild_not_found`, `auction_not_found`, `bid_not_found` |
+| 409 | `not_active` (auction already ended or cancelled) |
+| 413 / 415 | `payload_too_large` / `unsupported_media_type` |
+| 503 | `discord_unavailable` (retry shortly), `channel_not_configured` |
+
+### Routes
+
+`:g` is a Discord server (guild) ID. In user routes, `:userId` may be `me`.
+
+| Method & path | Who | Does |
+| --- | --- | --- |
+| `GET /v1/health` | API key only | `{ ok, discordReady }` |
+| `GET /v1/guilds` | anyone | Servers the bot shares with the user, with `isModerator` for each |
+| `POST /v1/guilds/:g/auctions` | Moderator | `/auction create`. Posts in `AUCTION_CHANNEL_ID`. Body below. |
+| `GET /v1/guilds/:g/auctions?status=` | Moderator | `/auction list`. `status` is `active` (default), `ended`, `cancelled` or `all`. |
+| `GET /v1/guilds/:g/auctions/:id?bidsLimit=` | Moderator | `/auction info`, with the most recent bids (default 25, max 500) |
+| `POST /v1/guilds/:g/auctions/:id/end` | Moderator | `/auction end` |
+| `POST /v1/guilds/:g/auctions/:id/cancel` | Moderator | `/auction cancel` |
+| `DELETE /v1/guilds/:g/auctions/:id` | Moderator | `/auction delete` |
+| `POST /v1/guilds/:g/cleanup` | Moderator | `/auction cleanup` |
+| `DELETE /v1/guilds/:g/auctions/:id/bids/:bidId` | Moderator | `/auction removebid` |
+| `PATCH /v1/guilds/:g/auctions/:id/bids/:bidId` | Moderator | `/auction editbid`, body `{ "amountCents": 30000 }` |
+| `GET /v1/guilds/:g/export.csv?auctionId=` | Moderator | `/auction export`, as a CSV download |
+| `GET /v1/guilds/:g/users/:userId/bids` | self / Moderator | Every bid the user placed in the server |
+| `GET /v1/guilds/:g/users/:userId/active` | self / Moderator | Open auctions they're in, with `standing` (`leading`, `in_slot` or `outbid`) and, for themselves only, `maxCents` |
+| `GET /v1/guilds/:g/users/:userId/wins` | self / Moderator | Ended auctions they won, with `amountCents` |
+
+Create body (unknown fields are rejected):
+
+```json
+{
+  "itemName": "MTG Fallout Commander Deck",
+  "startingBidCents": 2500,
+  "duration": "2d12h",
+  "description": "Sealed",
+  "incrementCents": 500,
+  "quantity": 1,
+  "groupMode": false,
+  "winners": null,
+  "warnBefore": "1h"
+}
+```
+
+Only `itemName`, `startingBidCents` and `duration` are required. The others default as in
+[Creating an auction](#creating-an-auction), and `null` also means "use the default".
+
 ## Project layout
 
 ```
@@ -158,8 +243,15 @@ src/
   db.js               SQLite schema + queries (atomic bid transaction)
   scheduler.js        closes auctions on time, reschedules after restarts
   commands/
-    auction.js        /auction create|list|info|end|cancel|export
+    auction.js        /auction subcommands (thin wrappers over services/auctions.js)
     bid.js            /bid
+  services/
+    auctions.js       moderator actions shared by /auction and the HTTP API
+    users.js          per-user views (own bids, open auctions, wins)
+  api/
+    server.js         HTTP API routes (node:http, under /v1)
+    auth.js           API key + Discord token verification
+    serialize.js      database rows -> API JSON
   util/
     money.js          dollars <-> integer cents
     time.js           duration parsing + Discord timestamps

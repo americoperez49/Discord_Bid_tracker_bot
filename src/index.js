@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { Client, GatewayIntentBits, Collection, Events, MessageFlags } = require('discord.js');
 const { initScheduler } = require('./scheduler');
+const { loadApiConfig, startApi } = require('./api/server');
 
 if (!process.env.DISCORD_TOKEN) {
   console.error('Missing DISCORD_TOKEN in environment. Copy .env.example to .env and fill it in.');
@@ -59,6 +60,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
 client.once(Events.ClientReady, (c) => {
   console.log(`Logged in as ${c.user.tag}`);
   initScheduler(client);
+
+  // Optional HTTP API for Rogue App (off unless API_ENABLED=true). Started after
+  // login so requests always see a ready client and a populated guild cache.
+  const apiConfig = loadApiConfig();
+  if (apiConfig) {
+    startApi(client, apiConfig).catch((err) => console.error('HTTP API failed to start:', err));
+  }
 });
 
 client.login(process.env.DISCORD_TOKEN);

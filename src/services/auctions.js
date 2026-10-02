@@ -317,13 +317,28 @@ async function createAuction(ctx, input) {
 
 // --- Read ------------------------------------------------------------------
 
-/** Active auctions in the guild (soonest-ending first), each with its high bid. */
-async function listActiveAuctions(ctx) {
+const AUCTION_STATUSES = ['active', 'ended', 'cancelled', 'all'];
+
+/**
+ * Auctions in the guild, each with its high bid. 'active' lists soonest-ending
+ * first; the other statuses list newest first.
+ * @param {'active'|'ended'|'cancelled'|'all'} [status='active']
+ */
+async function listAuctions(ctx, status = 'active') {
   await assertModerator(ctx);
-  return db.getActiveAuctionsForGuild(ctx.guildId).map((auction) => ({
-    auction,
-    highBid: db.getHighestBid(auction.id),
-  }));
+  if (!AUCTION_STATUSES.includes(status)) {
+    throw new ServiceError('invalid_input', `Status must be one of: ${AUCTION_STATUSES.join(', ')}.`);
+  }
+  const rows =
+    status === 'active'
+      ? db.getActiveAuctionsForGuild(ctx.guildId)
+      : db.getAllAuctionsForGuild(ctx.guildId).filter((a) => status === 'all' || a.status === status);
+  return rows.map((auction) => ({ auction, highBid: db.getHighestBid(auction.id) }));
+}
+
+/** Active auctions in the guild (soonest-ending first), each with its high bid. */
+function listActiveAuctions(ctx) {
+  return listAuctions(ctx, 'active');
 }
 
 /** One auction's details and its most recent bids. */
@@ -551,8 +566,10 @@ async function exportBidsCsv(ctx, auctionId = null) {
 
 module.exports = {
   ServiceError,
+  resolveGuild,
   assertModerator,
   createAuction,
+  listAuctions,
   listActiveAuctions,
   getAuctionInfo,
   endAuction,
