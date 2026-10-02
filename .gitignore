@@ -11,3 +11,7 @@ data/
 
 # Local planning scratch
 Plan to fix Ooopsies.markdown
+
+# rogue-cli (Rogue App stand-in): saved Discord tokens + its own settings
+.rogue-cli/
+.env.rogue-cli

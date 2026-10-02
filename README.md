@@ -234,6 +234,56 @@ Create body (unknown fields are rejected):
 Only `itemName`, `startingBidCents` and `duration` are required. The others default as in
 [Creating an auction](#creating-an-auction), and `null` also means "use the default".
 
+### Testing the API with rogue-cli
+
+Until Rogue App exists, `tools/rogue-cli` stands in for it. It plays Rogue App's server: it
+signs you in with Discord in your browser, saves your token, refreshes it when it expires,
+and sends every request with the API key plus your token.
+
+**One-time setup**
+
+1. In the [Discord Developer Portal](https://discord.com/developers/applications), pick the
+   application that will play Rogue App. This can be your test bot's application or a separate
+   one. Under **OAuth2**:
+   - add the redirect `http://localhost:53134/callback`;
+   - copy the **Client ID** and **Client Secret**.
+2. In the test bot's `.env`, turn the API on: `API_ENABLED=true`, an `API_KEY`,
+   `ROGUE_APP_CLIENT_ID` (that application's Client ID) and `AUCTION_CHANNEL_ID`. Restart the bot.
+3. Give the CLI the client secret, either in `.env` or in a separate `.env.rogue-cli`. Both are
+   git-ignored, and the CLI reads `.env.rogue-cli` first, then `.env`:
+   ```
+   ROGUE_APP_CLIENT_SECRET=...
+   ```
+   The CLI reuses `API_KEY`, `API_PORT`, `ROGUE_APP_CLIENT_ID` and `GUILD_ID` from `.env`. It
+   defaults to the API at `http://127.0.0.1:3000` and the server in `GUILD_ID`. Override them
+   with `ROGUE_CLI_API_URL` / `ROGUE_CLI_GUILD_ID`, or with `--api-url` / `--guild`.
+
+**Use**
+
+```bash
+npm run rogue -- help                     # every command and option
+npm run rogue -- login                    # sign in (opens your browser)
+npm run rogue -- login -p member          # a second saved login, e.g. a non-moderator account
+npm run rogue -- health
+npm run rogue -- create --item "MTG Deck" --starting-bid 25 --duration 2h
+npm run rogue -- list
+npm run rogue -- active                   # your own open auctions (with your max)
+npm run rogue -- active 1234567890 -p member   # someone else's, as a non-moderator → 403
+npm run rogue -- end 18
+npm run rogue -- export --auction 18
+```
+
+Dollar amounts are typed the same way as in the slash commands (`25`, `25.00`). Responses are
+printed as JSON, and the command exits with code 1 on any HTTP error. To test rejections, use
+`--no-key`, `--api-key wrong`, `--no-token`, or `raw`, which sends any request exactly as written:
+
+```bash
+npm run rogue -- raw POST /v1/guilds/123/auctions '{"itemName":"x","startingBidCents":-5,"duration":"1h"}'
+```
+
+`-v` prints each request, with the key and token hidden. Saved tokens live in `.rogue-cli/`
+(git-ignored). They're real Discord credentials for those accounts, so `logout` revokes them.
+
 ## Project layout
 
 ```
@@ -252,6 +302,8 @@ src/
     server.js         HTTP API routes (node:http, under /v1)
     auth.js           API key + Discord token verification
     serialize.js      database rows -> API JSON
+tools/
+  rogue-cli/          stand-in for Rogue App, for testing the API (npm run rogue)
   util/
     money.js          dollars <-> integer cents
     time.js           duration parsing + Discord timestamps
