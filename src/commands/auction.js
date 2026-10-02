@@ -11,30 +11,22 @@ const {
   ButtonStyle,
 } = require('discord.js');
 
-const db = require('../db');
 const { parseDollarsToCents, formatCents } = require('../util/money');
-const {
-  endTimeFromDuration,
-  parseDurationMs,
-  discordRelativeTime,
-} = require('../util/time');
+const { parseDurationMs, discordRelativeTime } = require('../util/time');
 const { buildAuctionEmbed } = require('../util/embeds');
-const { buildCsv } = require('../util/csv');
-const { isModerator } = require('../util/permissions');
 const {
   respondWithActiveAuctions,
   respondWithAllAuctions,
   respondWithBidders,
 } = require('../util/autocomplete');
-const { scheduleAuctionEnd, endAuction, cancelScheduled } = require('../scheduler');
+const auctions = require('../services/auctions');
 
-const DEFAULT_INCREMENT_CENTS = 500; // $5
-const DEFAULT_WARN_BEFORE_MS = 60 * 60 * 1000; // 1 hour
+const { ServiceError } = auctions;
 
 const data = new SlashCommandBuilder()
   .setName('auction')
   .setDescription('Create and manage item auctions.')
-  // Visible-by-default gate; enforced again at runtime for mod-only subcommands.
+  // Visible-by-default gate; the services layer enforces it again at runtime.
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
   .addSubcommand((sub) =>
     sub
@@ -196,51 +188,63 @@ async function autocomplete(interaction) {
   }
 }
 
-async function execute(interaction) {
-  const sub = interaction.options.getSubcommand();
+/**
+ * The service context for a slash-command interaction. The services check
+ * moderator status themselves; passing the interaction's member just saves
+ * them a fetch.
+ */
+function contextFor(interaction) {
+  return {
+    client: interaction.client,
+    guildId: interaction.guildId,
+    actorId: interaction.user.id,
+    member: interaction.member,
+  };
+}
 
-  // Runtime moderator gate for privileged subcommands.
-  const modOnly = ['create', 'end', 'cancel', 'export', 'delete', 'cleanup', 'removebid', 'editbid'];
-  if (modOnly.includes(sub) && !isModerator(interaction.member)) {
-    return interaction.reply({
-      content: '🚫 You need the moderator role (or "Manage Server") to use this command.',
-      flags: MessageFlags.Ephemeral,
-    });
-  }
+/** Ephemeral reply text for a ServiceError. */
+function errorText(err) {
+  const icon = err.code === 'not_moderator' ? '🚫' : '⚠️';
+  const hint = err.code === 'bid_not_found' ? ' Pick the bidder from the list.' : '';
+  return `${icon} ${err.message}${hint}`;
+}
 
-  switch (sub) {
-    case 'create':
-      return handleCreate(interaction);
-    case 'list':
-      return handleList(interaction);
-    case 'info':
-      return handleInfo(interaction);
-    case 'end':
-      return handleEnd(interaction);
-    case 'cancel':
-      return handleCancel(interaction);
-    case 'delete':
-      return handleDelete(interaction);
-    case 'removebid':
-      return handleRemoveBid(interaction);
-    case 'editbid':
-      return handleEditBid(interaction);
-    case 'cleanup':
-      return handleCleanup(interaction);
-    case 'export':
-      return handleExport(interaction);
-    default:
-      return interaction.reply({ content: 'Unknown subcommand.', flags: MessageFlags.Ephemeral });
+/**
+ * Show a ServiceError on `target` (the command or a confirm-button interaction).
+ * Anything else is rethrown for index.js's generic handler.
+ */
+async function replyError(target, err) {
+  if (!(err instanceof ServiceError)) throw err;
+  const content = errorText(err);
+  if (target.deferred || target.replied) {
+    await target.editReply({ content, components: [] });
+  } else {
+    await target.reply({ content, flags: MessageFlags.Ephemeral });
   }
 }
 
-/** Pin a message, returning whether it succeeded (needs Manage Messages). */
-async function tryPin(message) {
+const HANDLERS = {
+  create: handleCreate,
+  list: handleList,
+  info: handleInfo,
+  end: handleEnd,
+  cancel: handleCancel,
+  delete: handleDelete,
+  removebid: handleRemoveBid,
+  editbid: handleEditBid,
+  cleanup: handleCleanup,
+  export: handleExport,
+};
+
+async function execute(interaction) {
+  const handler = HANDLERS[interaction.options.getSubcommand()];
+  if (!handler) {
+    return interaction.reply({ content: 'Unknown subcommand.', flags: MessageFlags.Ephemeral });
+  }
   try {
-    await message.pin();
-    return true;
-  } catch {
-    return false;
+    await handler(interaction, contextFor(interaction));
+  } catch (err) {
+    await replyError(interaction, err);
   }
 }
 
@@ -252,144 +256,60 @@ function pinFailureNote(pinned) {
         `(and check the channel isn't at Discord's 50-pin limit).`;
 }
 
-async function handleCreate(interaction) {
-  const baseName = interaction.options.getString('item');
-  const startingBidCents = parseDollarsToCents(interaction.options.getString('starting_bid'));
-  const durationInput = interaction.options.getString('duration');
-  const description = interaction.options.getString('description') ?? null;
-  const incrementInput = interaction.options.getString('increment');
-  const quantity = interaction.options.getInteger('quantity') ?? 1;
-  const groupMode = interaction.options.getBoolean('group_bidding') ?? false;
-  const winners = interaction.options.getInteger('winners');
-  const warnInput = interaction.options.getString('warn_before');
-
-  if (startingBidCents === null || startingBidCents <= 0) {
-    return interaction.reply({
-      content: '⚠️ Starting bid must be a positive dollar amount, e.g. `25` or `25.00`.',
-      flags: MessageFlags.Ephemeral,
-    });
-  }
-
-  if (parseDurationMs(durationInput) === null) {
-    return interaction.reply({
-      content: '⚠️ Duration is invalid. Use forms like `2d12h`, `48h`, `90m`, or `1w`.',
-      flags: MessageFlags.Ephemeral,
-    });
-  }
-
-  let incrementCents = DEFAULT_INCREMENT_CENTS;
-  if (incrementInput) {
-    const parsed = parseDollarsToCents(incrementInput);
-    if (parsed === null || parsed <= 0) {
-      return interaction.reply({
-        content: '⚠️ Increment must be a positive dollar amount.',
-        flags: MessageFlags.Ephemeral,
-      });
-    }
-    incrementCents = parsed;
-  }
-
-  if (groupMode && (winners === null || winners < 2)) {
-    return interaction.reply({
-      content:
-        '⚠️ For group bidding, set `winners` to the number of winning slots (2–25). ' +
-        'Example: 4 identical cases → `group_bidding: True`, `winners: 4`.',
-      flags: MessageFlags.Ephemeral,
-    });
-  }
-
-  let warnBeforeMs = DEFAULT_WARN_BEFORE_MS;
-  if (warnInput) {
-    const parsed = parseDurationMs(warnInput);
-    if (parsed === null) {
-      return interaction.reply({
-        content: '⚠️ `warn_before` is invalid. Use forms like `1h`, `30m`, `2h`, or `1d`.',
-        flags: MessageFlags.Ephemeral,
-      });
-    }
-    warnBeforeMs = parsed;
-  }
+async function handleCreate(interaction, ctx) {
+  const opt = interaction.options;
+  // Absent optional options stay undefined (service default); unparseable ones
+  // become null, which the service rejects with a helpful message.
+  const optional = (value, parse) => (value === null ? undefined : parse(value));
+  const input = {
+    channelId: interaction.channelId,
+    itemName: opt.getString('item'),
+    description: opt.getString('description') ?? null,
+    startingBidCents: parseDollarsToCents(opt.getString('starting_bid')),
+    durationMs: parseDurationMs(opt.getString('duration')),
+    incrementCents: optional(opt.getString('increment'), parseDollarsToCents),
+    quantity: opt.getInteger('quantity') ?? undefined,
+    groupMode: opt.getBoolean('group_bidding') ?? undefined,
+    winners: opt.getInteger('winners'),
+    warnBeforeMs: optional(opt.getString('warn_before'), parseDurationMs),
+  };
 
   // Posting several announcement messages can take longer than Discord's 3s
   // reply window, so acknowledge first and edit the reply when done.
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-  const nowIso = new Date().toISOString();
-  const endTime = endTimeFromDuration(durationInput);
-
-  // Ending-soon reminder time. Skip it if it would land in the past (auction is
-  // shorter than the requested lead time).
-  const warnMs = new Date(endTime).getTime() - warnBeforeMs;
-  const warnTime = warnMs > Date.now() ? new Date(warnMs).toISOString() : null;
-
-  const base = {
-    guild_id: interaction.guildId,
-    channel_id: interaction.channelId,
-    message_id: null,
-    description,
-    starting_bid_cents: startingBidCents,
-    min_increment_cents: incrementCents,
-    created_by: interaction.user.id,
-    created_at: nowIso,
-    end_time: endTime,
-    warn_time: warnTime,
-  };
+  const result = await auctions.createAuction(ctx, input);
+  const { auctions: created, endTime, warnTime } = result;
+  const startingBid = formatCents(input.startingBidCents);
   const warnNote = warnTime
     ? ` A reminder will post ${discordRelativeTime(warnTime)}.`
     : ` _(No ending-soon reminder — the auction is shorter than the reminder lead time.)_`;
 
-  // Group bidding: one shared auction with N winner slots (quantity is ignored).
-  if (groupMode) {
-    const auction = db.createAuction({ ...base, item_name: baseName, group_mode: 1, winners });
-    const message = await interaction.channel.send({ embeds: [buildAuctionEmbed(auction)] });
-    db.setAuctionMessageId(auction.id, message.id);
-    auction.message_id = message.id;
-    scheduleAuctionEnd(auction);
-    const pinned = await tryPin(message);
-
-    let content =
-      `✅ Group auction **#${auction.id} — ${baseName}** created with **${winners} winner slots**. ` +
-      `Starting bid ${formatCents(startingBidCents)}, ends ${discordRelativeTime(endTime)}.${warnNote}` +
-      `${pinFailureNote(pinned)}`;
-    if (quantity > 1) content += `\n_(quantity is ignored in group mode — winners controls the slots.)_`;
-    await interaction.editReply({ content });
-    return;
+  let content;
+  if (result.groupMode) {
+    const [auction] = created;
+    content =
+      `✅ Group auction **#${auction.id} — ${input.itemName}** created with **${auction.winners} winner slots**. ` +
+      `Starting bid ${startingBid}, ends ${discordRelativeTime(endTime)}.${warnNote}` +
+      `${pinFailureNote(result.allPinned)}`;
+    if (result.quantityIgnored) content += `\n_(quantity is ignored in group mode — winners controls the slots.)_`;
+  } else {
+    const idList = created.map((a) => `#${a.id}`).join(', ');
+    content =
+      (created.length > 1
+        ? `✅ Created **${created.length}** auctions for **${input.itemName}** (${idList}). ` +
+          `Starting bid ${startingBid} each, all end ${discordRelativeTime(endTime)}.${warnNote}`
+        : `✅ Auction **${idList} — ${input.itemName}** created. ` +
+          `Starting bid ${startingBid}, ends ${discordRelativeTime(endTime)}.${warnNote}`) +
+      pinFailureNote(result.allPinned);
   }
-
-  // Normal mode: `quantity` independent auctions.
-  const created = [];
-  let allPinned = true;
-  for (let i = 1; i <= quantity; i++) {
-    // When listing multiple copies, make each one's name distinct.
-    const itemName = quantity > 1 ? `${baseName} (${i} of ${quantity})` : baseName;
-
-    const auction = db.createAuction({ ...base, item_name: itemName });
-
-    // Post the public announcement, then remember its id so we can keep it updated.
-    const message = await interaction.channel.send({ embeds: [buildAuctionEmbed(auction)] });
-    db.setAuctionMessageId(auction.id, message.id);
-    auction.message_id = message.id;
-
-    scheduleAuctionEnd(auction);
-    if (!(await tryPin(message))) allPinned = false;
-    created.push(auction);
-  }
-
-  const idList = created.map((a) => `#${a.id}`).join(', ');
-  const content =
-    (quantity > 1
-      ? `✅ Created **${quantity}** auctions for **${baseName}** (${idList}). ` +
-        `Starting bid ${formatCents(startingBidCents)} each, all end ${discordRelativeTime(endTime)}.${warnNote}`
-      : `✅ Auction **${idList} — ${baseName}** created. ` +
-        `Starting bid ${formatCents(startingBidCents)}, ends ${discordRelativeTime(endTime)}.${warnNote}`) +
-    pinFailureNote(allPinned);
 
   await interaction.editReply({ content });
 }
 
-async function handleList(interaction) {
-  const auctions = db.getActiveAuctionsForGuild(interaction.guildId);
-  if (auctions.length === 0) {
+async function handleList(interaction, ctx) {
+  const rows = await auctions.listActiveAuctions(ctx);
+  if (rows.length === 0) {
     return interaction.reply({
       content: 'There are no active auctions right now.',
       flags: MessageFlags.Ephemeral,
@@ -398,10 +318,9 @@ async function handleList(interaction) {
 
   const embed = new EmbedBuilder()
     .setColor(0x2ecc71)
-    .setTitle(`🏷️ Active auctions (${auctions.length})`);
+    .setTitle(`🏷️ Active auctions (${rows.length})`);
 
-  for (const a of auctions.slice(0, 25)) {
-    const high = db.getHighestBid(a.id);
+  for (const { auction: a, highBid: high } of rows.slice(0, 25)) {
     const highText = high
       ? `${formatCents(high.amount_cents)} (<@${high.user_id}>)`
       : `no bids — starts at ${formatCents(a.starting_bid_cents)}`;
@@ -414,22 +333,17 @@ async function handleList(interaction) {
   return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
 }
 
-async function handleInfo(interaction) {
-  const auctionId = interaction.options.getInteger('item');
-  const auction = db.getAuction(auctionId);
-  if (!auction || auction.guild_id !== interaction.guildId) {
-    return interaction.reply({
-      content: `⚠️ Auction #${auctionId} not found in this server.`,
-      flags: MessageFlags.Ephemeral,
-    });
-  }
+async function handleInfo(interaction, ctx) {
+  const { auction, bidCount, recentBids } = await auctions.getAuctionInfo(
+    ctx,
+    interaction.options.getInteger('item'),
+  );
 
   const embed = buildAuctionEmbed(auction);
-  const recent = db.getRecentBids(auctionId, 10);
-  if (recent.length > 0) {
+  if (recentBids.length > 0) {
     embed.addFields({
-      name: `Recent bids (${db.getBidCount(auctionId)} total)`,
-      value: recent
+      name: `Recent bids (${bidCount} total)`,
+      value: recentBids
         .map((b) => `• <@${b.user_id}> — ${formatCents(b.amount_cents)} (${discordRelativeTime(b.placed_at)})`)
         .join('\n')
         .slice(0, 1024),
@@ -439,57 +353,27 @@ async function handleInfo(interaction) {
   return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
 }
 
-async function handleEnd(interaction) {
+async function handleEnd(interaction, ctx) {
   const auctionId = interaction.options.getInteger('item');
-  const auction = db.getAuction(auctionId);
-  if (!auction || auction.guild_id !== interaction.guildId) {
-    return interaction.reply({
-      content: `⚠️ Auction #${auctionId} not found in this server.`,
-      flags: MessageFlags.Ephemeral,
-    });
-  }
-  if (auction.status !== 'active') {
-    return interaction.reply({
-      content: `⚠️ Auction #${auctionId} is already ${auction.status}.`,
-      flags: MessageFlags.Ephemeral,
-    });
-  }
-
-  await endAuction(auctionId, 'ended');
-  return interaction.reply({
-    content: `🏁 Auction #${auctionId} ended. The result has been announced.`,
-    flags: MessageFlags.Ephemeral,
-  });
+  // Announcing the result can take a few seconds; acknowledge first.
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  await auctions.endAuction(ctx, auctionId);
+  await interaction.editReply({ content: `🏁 Auction #${auctionId} ended. The result has been announced.` });
 }
 
-async function handleCancel(interaction) {
+async function handleCancel(interaction, ctx) {
   const auctionId = interaction.options.getInteger('item');
-  const auction = db.getAuction(auctionId);
-  if (!auction || auction.guild_id !== interaction.guildId) {
-    return interaction.reply({
-      content: `⚠️ Auction #${auctionId} not found in this server.`,
-      flags: MessageFlags.Ephemeral,
-    });
-  }
-  if (auction.status !== 'active') {
-    return interaction.reply({
-      content: `⚠️ Auction #${auctionId} is already ${auction.status}.`,
-      flags: MessageFlags.Ephemeral,
-    });
-  }
-
-  await endAuction(auctionId, 'cancelled');
-  return interaction.reply({
-    content: `❌ Auction #${auctionId} cancelled.`,
-    flags: MessageFlags.Ephemeral,
-  });
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  await auctions.cancelAuction(ctx, auctionId);
+  await interaction.editReply({ content: `❌ Auction #${auctionId} cancelled.` });
 }
 
 /**
  * Show a Confirm/Cancel button prompt (ephemeral) and wait for the invoker's
- * choice. Resolves to the button interaction if confirmed, or null if the user
- * cancelled or the 30s window elapsed (in which case the reply is already
- * updated). The caller finalises the message via `confirmation.update(...)`.
+ * choice. Resolves to the (deferred) button interaction if confirmed, or null
+ * if the user cancelled or the 30s window elapsed (in which case the reply is
+ * already updated). The caller finalises the message via
+ * `confirmation.editReply(...)`.
  */
 async function confirmDestructive(interaction, promptContent, confirmLabel) {
   const row = new ActionRowBuilder().addComponents(
@@ -520,36 +404,25 @@ async function confirmDestructive(interaction, promptContent, confirmLabel) {
     return null;
   }
 
+  // The action may post to the channel before we answer; buy time past 3s.
+  await confirmation.deferUpdate();
   return confirmation;
 }
 
-/** Best-effort removal of an auction's public announcement message. */
-async function deleteAnnouncement(interaction, auction) {
-  if (!auction.message_id) return;
+/** Run the confirmed action, showing any ServiceError on the prompt message. */
+async function runConfirmed(confirmation, action) {
   try {
-    const channel =
-      auction.channel_id === interaction.channelId
-        ? interaction.channel
-        : await interaction.client.channels.fetch(auction.channel_id).catch(() => null);
-    if (!channel?.isTextBased()) return;
-    const msg = await channel.messages.fetch(auction.message_id).catch(() => null);
-    if (msg) await msg.delete();
-  } catch {
-    /* message may already be gone — ignore */
+    const content = await action();
+    await confirmation.editReply({ content, components: [] });
+  } catch (err) {
+    await replyError(confirmation, err);
   }
 }
 
-async function handleDelete(interaction) {
+async function handleDelete(interaction, ctx) {
   const auctionId = interaction.options.getInteger('item');
-  const auction = db.getAuction(auctionId);
-  if (!auction || auction.guild_id !== interaction.guildId) {
-    return interaction.reply({
-      content: `⚠️ Auction #${auctionId} not found in this server.`,
-      flags: MessageFlags.Ephemeral,
-    });
-  }
+  const { auction, bidCount } = await auctions.previewDeleteAuction(ctx, auctionId);
 
-  const bidCount = db.getBidCount(auctionId);
   let prompt =
     `🗑️ Delete auction **#${auction.id} — ${auction.item_name}** (${auction.status})?\n` +
     `This permanently removes it and its **${bidCount}** bid(s), and can't be undone.`;
@@ -560,20 +433,14 @@ async function handleDelete(interaction) {
   const confirmation = await confirmDestructive(interaction, prompt, 'Delete');
   if (!confirmation) return;
 
-  cancelScheduled(auctionId);
-  db.deleteAuction(auctionId);
-
-  await confirmation.update({
-    content: `🗑️ Deleted auction **#${auction.id} — ${auction.item_name}** and its ${bidCount} bid(s).`,
-    components: [],
+  await runConfirmed(confirmation, async () => {
+    const deleted = await auctions.deleteAuction(ctx, auctionId);
+    return `🗑️ Deleted auction **#${deleted.auction.id} — ${deleted.auction.item_name}** and its ${deleted.bidCount} bid(s).`;
   });
-
-  // Remove the public listing message after confirming (best-effort).
-  deleteAnnouncement(interaction, auction).catch(() => {});
 }
 
-async function handleCleanup(interaction) {
-  const finished = db.getFinishedAuctionsForGuild(interaction.guildId);
+async function handleCleanup(interaction, ctx) {
+  const finished = await auctions.previewCleanup(ctx);
   if (finished.length === 0) {
     return interaction.reply({
       content: 'There are no ended or cancelled auctions to clean up.',
@@ -588,48 +455,16 @@ async function handleCleanup(interaction) {
   const confirmation = await confirmDestructive(interaction, prompt, `Delete ${finished.length}`);
   if (!confirmation) return;
 
-  const removed = db.deleteFinishedAuctionsForGuild(interaction.guildId);
-
-  await confirmation.update({
-    content: `🧹 Deleted **${removed.length}** finished auction(s). Their old listing messages remain as a record.`,
-    components: [],
+  await runConfirmed(confirmation, async () => {
+    const removed = await auctions.cleanupFinished(ctx);
+    return `🧹 Deleted **${removed.length}** finished auction(s). Their old listing messages remain as a record.`;
   });
 }
 
-/** Edit the auction's announcement message so its embed reflects current state. */
-async function refreshAnnouncement(interaction, auction) {
-  if (!auction?.message_id) return;
-  try {
-    const channel =
-      auction.channel_id === interaction.channelId
-        ? interaction.channel
-        : await interaction.client.channels.fetch(auction.channel_id).catch(() => null);
-    if (!channel?.isTextBased()) return;
-    const msg = await channel.messages.fetch(auction.message_id).catch(() => null);
-    if (msg) await msg.edit({ embeds: [buildAuctionEmbed(auction)] });
-  } catch {
-    /* non-fatal */
-  }
-}
-
-/** Resolve and validate the auction + selected bid for a mod bid command. */
-function resolveAuctionAndBid(interaction) {
+async function handleRemoveBid(interaction, ctx) {
   const auctionId = interaction.options.getInteger('item');
   const bidId = interaction.options.getInteger('bidder');
-  const auction = db.getAuction(auctionId);
-  if (!auction || auction.guild_id !== interaction.guildId) {
-    return { error: `⚠️ Auction #${auctionId} not found in this server.` };
-  }
-  const bid = db.getBid(bidId);
-  if (!bid || bid.auction_id !== auctionId) {
-    return { error: '⚠️ That bid was not found on this auction. Pick the bidder from the list.' };
-  }
-  return { auction, bid };
-}
-
-async function handleRemoveBid(interaction) {
-  const { auction, bid, error } = resolveAuctionAndBid(interaction);
-  if (error) return interaction.reply({ content: error, flags: MessageFlags.Ephemeral });
+  const { auction, bid, reinstated } = await auctions.previewRemoveBid(ctx, auctionId, bidId);
 
   const label = `#${auction.id} — ${auction.item_name}`;
   let prompt =
@@ -637,164 +472,53 @@ async function handleRemoveBid(interaction) {
     `This can't be undone.`;
   // For group auctions, tell the mod up front whether this reinstates anyone.
   if (auction.group_mode) {
-    const restored = db.reinstatementFor(bid.id);
-    prompt += restored
-      ? `\n↩️ This will reinstate **${restored.username}** (${formatCents(restored.amount_cents)}) to a winning slot.`
+    prompt += reinstated
+      ? `\n↩️ This will reinstate **${reinstated.username}** (${formatCents(reinstated.amount_cents)}) to a winning slot.`
       : `\n↩️ No bidder will be reinstated.`;
   }
+
   const confirmation = await confirmDestructive(interaction, prompt, 'Remove bid');
   if (!confirmation) return;
 
-  const result = db.removeBid(bid.id);
-  await confirmation.update({
-    content: `🗑️ Removed **${bid.username}**'s bid of ${formatCents(bid.amount_cents)}.`,
-    components: [],
+  await runConfirmed(confirmation, async () => {
+    await auctions.removeBid(ctx, auctionId, bidId);
+    return `🗑️ Removed **${bid.username}**'s bid of ${formatCents(bid.amount_cents)}.`;
   });
-
-  await refreshAnnouncement(interaction, db.getAuction(auction.id));
-
-  const restoredNote = result?.restored
-    ? ` **${result.restored.username}** is back in a winning slot.`
-    : '';
-  await interaction.channel
-    ?.send({
-      content:
-        `🛠️ A moderator removed **${bid.username}**'s bid of ` +
-        `**${formatCents(bid.amount_cents)}** on **${label}**.${restoredNote}`,
-      allowedMentions: { parse: [] },
-    })
-    .catch(() => {});
 }
 
-async function handleEditBid(interaction) {
-  const { auction, bid, error } = resolveAuctionAndBid(interaction);
-  if (error) return interaction.reply({ content: error, flags: MessageFlags.Ephemeral });
-
+async function handleEditBid(interaction, ctx) {
+  const auctionId = interaction.options.getInteger('item');
+  const bidId = interaction.options.getInteger('bidder');
   const newCents = parseDollarsToCents(interaction.options.getString('amount'));
-  if (newCents === null || newCents <= 0) {
-    return interaction.reply({
-      content: '⚠️ Amount must be a positive dollar value, e.g. `300` or `299.99`.',
-      flags: MessageFlags.Ephemeral,
-    });
-  }
+  const { auction, bid } = await auctions.previewEditBid(ctx, auctionId, bidId, newCents);
 
   const label = `#${auction.id} — ${auction.item_name}`;
   const prompt =
     `✏️ Change **${bid.username}**'s bid on **${label}** from ` +
     `**${formatCents(bid.amount_cents)}** to **${formatCents(newCents)}**?`;
+
   const confirmation = await confirmDestructive(interaction, prompt, 'Update bid');
   if (!confirmation) return;
 
-  const result = db.editBidAmount(bid.id, newCents);
-  await confirmation.update({
-    content: `✏️ Updated **${bid.username}**'s bid to ${formatCents(newCents)}.`,
-    components: [],
+  await runConfirmed(confirmation, async () => {
+    await auctions.editBid(ctx, auctionId, bidId, newCents);
+    return `✏️ Updated **${bid.username}**'s bid to ${formatCents(newCents)}.`;
   });
-
-  await refreshAnnouncement(interaction, db.getAuction(auction.id));
-
-  await interaction.channel
-    ?.send({
-      content:
-        `🛠️ A moderator changed **${bid.username}**'s bid on **${label}** from ` +
-        `**${formatCents(result.oldAmountCents)}** to **${formatCents(newCents)}**.`,
-      allowedMentions: { parse: [] },
-    })
-    .catch(() => {});
 }
 
-async function handleExport(interaction) {
+async function handleExport(interaction, ctx) {
   const auctionId = interaction.options.getInteger('item');
-
-  let auctions;
-  if (auctionId !== null) {
-    const a = db.getAuction(auctionId);
-    if (!a || a.guild_id !== interaction.guildId) {
-      return interaction.reply({
-        content: `⚠️ Auction #${auctionId} not found in this server.`,
-        flags: MessageFlags.Ephemeral,
-      });
-    }
-    auctions = [a];
-  } else {
-    auctions = db.getAllAuctionsForGuild(interaction.guildId);
-    if (auctions.length === 0) {
-      return interaction.reply({
-        content: 'There are no auctions to export in this server.',
-        flags: MessageFlags.Ephemeral,
-      });
-    }
+  const { csv, fileName, auctionCount, rowCount } = await auctions.exportBidsCsv(ctx, auctionId);
+  if (auctionCount === 0) {
+    return interaction.reply({
+      content: 'There are no auctions to export in this server.',
+      flags: MessageFlags.Ephemeral,
+    });
   }
 
-  const headers = [
-    'auction_id',
-    'item_name',
-    'auction_type',
-    'winner_slots',
-    'auction_status',
-    'auction_end_time_utc',
-    'bidder_user_id',
-    'bidder_username',
-    'bid_amount',
-    'bid_placed_at_utc',
-    'bid_placed_at_readable',
-    'is_winning_bid',
-    'displaced_bidder',
-    'displaced_bid_amount',
-    'auto_bid',
-  ];
-
-  const rows = [];
-  for (const a of auctions) {
-    const type = a.group_mode ? 'group' : 'single';
-    const slots = a.group_mode ? a.winners : 1;
-    // Export newest bid first. placed_at is an ISO UTC string, so a
-    // lexicographic sort is also chronological (descending = newest first).
-    const bids = db
-      .getBidsForAuction(a.id)
-      .slice()
-      .sort((x, y) => (x.placed_at < y.placed_at ? 1 : x.placed_at > y.placed_at ? -1 : 0));
-    if (bids.length === 0) {
-      rows.push([a.id, a.item_name, type, slots, a.status, a.end_time, '', '(no bids)', '', '', '', '', '', '', '']);
-      continue;
-    }
-    for (const b of bids) {
-      // Group winners are the bids still active at close; normal auctions have
-      // the single recorded top bid.
-      const isWinning =
-        a.status === 'ended' &&
-        (a.group_mode
-          ? b.active === 1
-          : a.winner_user_id === b.user_id && a.winning_amount_cents === b.amount_cents);
-      // Which bidder (if any) this bid knocked out of a winning slot when placed.
-      const displaced = b.displaced_bid_id != null ? db.getBid(b.displaced_bid_id) : null;
-      rows.push([
-        a.id,
-        a.item_name,
-        type,
-        slots,
-        a.status,
-        a.end_time,
-        b.user_id,
-        b.username,
-        formatCents(b.amount_cents),
-        b.placed_at,
-        new Date(b.placed_at).toUTCString(),
-        isWinning ? 'yes' : 'no',
-        displaced ? displaced.username : '',
-        displaced ? formatCents(displaced.amount_cents) : '',
-        b.auto ? 'yes' : 'no',
-      ]);
-    }
-  }
-
-  const csv = buildCsv(headers, rows);
-  const fileName =
-    auctionId !== null ? `auction-${auctionId}-bids.csv` : `all-auctions-bids.csv`;
   const attachment = new AttachmentBuilder(Buffer.from(csv, 'utf8'), { name: fileName });
-
   return interaction.reply({
-    content: `📄 Export ready (${rows.length} row(s)).`,
+    content: `📄 Export ready (${rowCount} row(s)).`,
     files: [attachment],
     flags: MessageFlags.Ephemeral,
   });
